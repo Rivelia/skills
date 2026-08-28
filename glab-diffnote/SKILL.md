@@ -14,10 +14,12 @@ description: Post GitLab MR discussion threads anchored to diff lines (DiffNotes
    - added (`+`) line → `new_line` only
    - unchanged context line inside a hunk → both `old_line` and `new_line`
    - line outside every hunk → cannot host a DiffNote; anchor on the nearest changed line and note the shift in the body
-3. POST a JSON body:
+3. Write the JSON body to a scratch file with the Write tool, then POST it with `--input`. Never assemble the JSON inline in a shell command — review prose routinely contains apostrophes, and inside a single-quoted shell string an odd count kills the command while an even count silently mangles the note via word-splitting and glob expansion.
 
-   ```bash
-   printf '%s' '{
+   `payload.json`:
+
+   ```json
+   {
      "body": "…",
      "position": {
        "position_type": "text",
@@ -25,9 +27,13 @@ description: Post GitLab MR discussion threads anchored to diff lines (DiffNotes
        "old_path": "path/to/file", "new_path": "path/to/file",
        "new_line": 42
      }
-   }' | glab api "projects/:id/merge_requests/<iid>/discussions" -X POST -H "Content-Type: application/json" --input -
+   }
    ```
 
-   `old_path` is required even for new files (same as `new_path` unless renamed).
+   ```bash
+   glab api "projects/:id/merge_requests/<iid>/discussions" -X POST -H "Content-Type: application/json" --input payload.json
+   ```
 
-4. Verify every response: `notes[0].type` must be `"DiffNote"`. `"DiscussionNote"` means the position was silently dropped — delete the note (`DELETE …/discussions/<discussion_id>/notes/<note_id>`) and fix the payload before reposting. A 400 mentioning `line_code` means the anchor line is not in the diff — reclassify it per step 2.
+   `body` must be a valid JSON string: `\n` for line breaks (a raw newline inside the string is invalid JSON), `\"` for double quotes, `\\` for backslashes — especially when quoting code from the diff. `old_path` is required even for new files (same as `new_path` unless renamed).
+
+4. Verify every response: `notes[0].type` must be `"DiffNote"`. `"DiscussionNote"` means the position was silently dropped — delete the note (`DELETE …/discussions/<discussion_id>/notes/<note_id>`) and fix the payload before reposting. A 400 mentioning `line_code` means the anchor line is not in the diff — reclassify it per step 2. A 400 about parsing or invalid JSON means the payload file is malformed — almost always an unescaped newline, quote, or backslash in `body`.

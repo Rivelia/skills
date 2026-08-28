@@ -85,11 +85,11 @@ A Workflow converges the scoped code to a stable simplified form: rounds of find
    - the step-2 hash command — keep the 64-character hex hash;
    - `git -c core.quotePath=false ls-files -o --exclude-standard` — keep every path as `untrackedBaseline`. The workflow subtracts this set from a later listing to find files that appeared during the run, including any an apply agent created without declaring. Pass it **raw**: unlike `files` and the prune lists, do not filter it — a path filtered out here looks like a file the run created.
 
-7. **Launch the workflow**:
+7. **Launch the workflow.** First resolve the absolute path of [simplify.mjs](simplify.mjs) — it sits next to this SKILL.md in the skill's folder, wherever this skill is installed. Test the standard locations via Bash, project install first: `./.claude/skills/simplify-workflow/simplify.mjs` (resolved to an absolute path from the project root), then `~/.claude/skills/simplify-workflow/simplify.mjs`. If neither exists, ask the user where the skill is installed and stop without launching anything. Substitute the resolved path below:
 
    ```
    Workflow({
-     scriptPath: "/home/rivelia/.claude/skills/simplify-workflow/simplify.mjs",
+     scriptPath: "<absolute path to simplify.mjs>",
      args: { scope: "<scope>", hashCmd: "<hash command>", baselineHash: "<baseline>", untrackedBaseline: [<raw untracked listing>], files: [<file list>], checkCmd: "<check command, omit when not found>", model: "<model, omit when not given>", effort: "<effort, required with model, omit otherwise>", prune: true (omit when pruning is off), pruneFiles: [<tracked prune candidates>], pruneUntrackedFiles: [<untracked prune candidates>], pruneExts: [<comment-carrying source extensions>], base: "<step-4 base ref, required for every scope except codebase, where it is omitted>", root: "<absolute project root>" }
    })
    ```

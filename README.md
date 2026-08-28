@@ -21,7 +21,7 @@ bunx skills@latest add Rivelia/skills
 Install specific skills only:
 
 ```bash
-npx skills@latest add Rivelia/skills --skill glab-diffnote,glab-upload
+npx skills@latest add Rivelia/skills --skill glab-diffnote glab-upload
 ```
 
 Install everything globally for all agents without prompts:

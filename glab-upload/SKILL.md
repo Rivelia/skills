@@ -5,17 +5,13 @@ description: Upload screenshots/images to a GitLab project and embed them in MR 
 
 # glab uploads
 
-`glab api -F "file=@shot.png"` sends the literal string, never the file — GitLab answers `{"error":"file is invalid"}`. Upload with curl using glab's token instead.
+`glab api -F "file=@shot.png"` reads the file but sends its contents as a JSON string — GitLab answers `{"error":"file is invalid"}`. The uploads endpoint needs multipart/form-data, which is what `--form` sends.
 
-Run from inside the repo (glab resolves `:id` and the token from there):
+Run from inside the repo (glab resolves `:id` and auth from there):
 
 ```bash
-TOKEN=$(glab auth status -t 2>&1 | grep -oP 'glpat-\S+')
-API=$(glab api projects/:id | python3 -c "import sys,json; print(json.load(sys.stdin)['_links']['self'])")
-curl -s -H "PRIVATE-TOKEN: $TOKEN" -F "file=@shot.png" "$API/uploads" \
+glab api --method POST projects/:id/uploads --form "file=@shot.png" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['markdown'])"
 ```
 
-Prints `![shot](/uploads/<hash>/shot.png)` — paste verbatim into the MR description or a note. The path is project-relative: it only renders inside the same project. One curl per file; upload before `glab mr create`, then place each line under the template's Screenshots section with a bold one-line caption above it.
-
-If the grep finds no `glpat-` token (keyring/OAuth auth), take the token from `$GITLAB_TOKEN`.
+Prints `![shot](/uploads/<hash>/shot.png)` — paste verbatim into the MR description or a note. The path is project-relative: it only renders inside the same project. One upload per file; upload before `glab mr create`, then place each line under the template's Screenshots section with a bold one-line caption above it.

@@ -27,6 +27,13 @@ if (!input || !FOCUS[input.scope] || !input.hashCmd || !input.baselineHash || !A
   throw new Error('args must be {scope: "uncommitted"|"branch"|"unpushed"|"codebase", hashCmd: string, baselineHash: string, files: string[], untrackedBaseline: string[], base?: string (required unless scope is "codebase"), model?: string, effort?: string}')
 }
 
+// The baseline seeds the same convergence set the round hashes land in, and
+// those are pinned to bare lowercase hex — a raw `sha256sum` line ("<hash>  -")
+// would never match any round hash and fake a tree change on an untouched tree.
+if (!/^[0-9a-f]{64}$/.test(input.baselineHash)) {
+  throw new Error('baselineHash must be the bare 64-character lowercase hex hash — the first field of the hash command output, nothing else')
+}
+
 // An empty scope has nothing to converge.
 if (input.files.length === 0) {
   throw new Error('files must not be empty — nothing is in scope')
@@ -731,6 +738,7 @@ while (true) {
   )
 
   const newFiles = []
+  const revived = new Set()
   let roundApplied = 0
   let roundHadDead = false
   for (let i = 0; i < targets.length; i++) {
@@ -813,11 +821,16 @@ while (true) {
         // instead of waiting for the sweep. An abandoned owner is skipped —
         // reviving it would only spend two more rounds re-abandoning it.
         const owner = batches.find(b => b !== batch && !b.abandoned && b.files.includes(f))
-        if (owner && !owner.active) owner.active = true
+        if (owner) revived.add(owner)
       }
     }
     allChanges.push(...applied)
   }
+  // Applied only after every batch's own status is written: an owner at a later
+  // index would otherwise overwrite its revival with its own clean/all-rejected
+  // verdict, leaving the re-look to whichever sweep comes next. Abandonment is
+  // re-checked — the owner may have been abandoned after it was collected.
+  for (const b of revived) if (!b.abandoned) b.active = true
   for (const f of newFiles) assignNewFile(f)
   filesCreatedDuringRun.push(...newFiles)
 
