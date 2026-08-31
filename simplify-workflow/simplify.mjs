@@ -1,13 +1,13 @@
 export const meta = {
   name: 'simplify-converge',
-  description: 'Loop find→judge→apply simplification rounds over a scope until fresh finders come up empty; optionally prune non-useful comments once converged',
+  description: 'Loop simplification rounds (find, judge, apply) over a scope until fresh finders come up empty; optionally prune non-useful comments once converged',
   phases: [
     { title: 'Find', detail: 'read-only agents propose simplifications per batch', model: 'opus' },
     { title: 'Judge', detail: 'independent gatekeepers strike proposals that are not genuine improvements', model: 'opus' },
     { title: 'Apply', detail: 'implement the approved findings per batch', model: 'opus' },
     { title: 'Hash', detail: 'deterministic tree hash after each round', model: 'sonnet' },
     { title: 'Discover', detail: 'list untracked files the appliers did not declare', model: 'sonnet' },
-    { title: 'Verify', detail: 'project check command — baseline, then a fix-up agent after each editing phase', model: 'opus' },
+    { title: 'Verify', detail: 'project check command: baseline, then a fix-up agent after each editing phase', model: 'opus' },
     { title: 'Classify', detail: 'flag comment removal candidates per file batch', model: 'opus' },
     { title: 'Remove', detail: 'delete confirmed candidates per batch', model: 'opus' },
   ],
@@ -20,7 +20,6 @@ const FOCUS = {
   codebase: 'Focus on the entire codebase.',
 }
 
-// Tolerate args arriving as a JSON-encoded string instead of an object.
 const input = typeof args === 'string' ? JSON.parse(args) : args
 
 if (!input || !FOCUS[input.scope] || !input.hashCmd || !input.baselineHash || !Array.isArray(input.files) || !Array.isArray(input.untrackedBaseline)) {
@@ -28,19 +27,16 @@ if (!input || !FOCUS[input.scope] || !input.hashCmd || !input.baselineHash || !A
 }
 
 // The baseline seeds the same convergence set the round hashes land in, and
-// those are pinned to bare lowercase hex — a raw `sha256sum` line ("<hash>  -")
+// those are pinned to bare lowercase hex; a raw `sha256sum` line ("<hash>  -")
 // would never match any round hash and fake a tree change on an untouched tree.
 if (!/^[0-9a-f]{64}$/.test(input.baselineHash)) {
-  throw new Error('baselineHash must be the bare 64-character lowercase hex hash — the first field of the hash command output, nothing else')
+  throw new Error('baselineHash must be the bare 64-character lowercase hex hash, the first field of the hash command output, nothing else')
 }
 
-// An empty scope has nothing to converge.
 if (input.files.length === 0) {
-  throw new Error('files must not be empty — nothing is in scope')
+  throw new Error('files must not be empty; nothing is in scope')
 }
 
-// Every non-codebase scope is diff-bounded, so agents need the base ref to know
-// which parts of a file the scope actually covers.
 if (input.scope !== 'codebase' && !input.base) {
   throw new Error('uncommitted/branch/unpushed scope requires base (a git ref bounding the diff)')
 }
@@ -51,38 +47,34 @@ if (input.model && !EFFORTS.includes(input.effort)) {
 }
 
 if (input.prune) {
-  // Two empty lists are a legitimate launch — a diff that adds no comment and no
+  // Two empty lists are a legitimate launch: a diff that adds no comment and no
   // untracked source still leaves the comments the simplify phase itself writes
   // to classify. An absent key is a different thing: an orchestrator that
   // computed candidates and failed to pass them would silently narrow the audit
   // to the files the run touched.
   for (const key of ['pruneFiles', 'pruneUntrackedFiles']) {
-    if (input[key] === undefined) throw new Error(`prune requires ${key}: string[] — pass [] for a list with no candidates`)
+    if (input[key] === undefined) throw new Error(`prune requires ${key}: string[]; pass [] for a list with no candidates`)
     if (!Array.isArray(input[key])) throw new Error(`${key} must be string[] when given`)
   }
   // Files that appear mid-run are not in either candidate list, so the script
-  // needs the orchestrator's own extension filter to judge them by. Inferring
-  // it from the candidates would under-cover: a scope whose candidates are all
-  // .ts would silently skip a .svelte file a pass created.
+  // needs the orchestrator's own extension filter to judge them by.
   if (!Array.isArray(input.pruneExts) || input.pruneExts.length === 0) {
-    throw new Error('prune requires pruneExts: string[] — the extensions the candidate lists were filtered on, e.g. [".ts", ".js", ".svelte"]')
+    throw new Error('prune requires pruneExts: string[], the extensions the candidate lists were filtered on, e.g. [".ts", ".js", ".svelte"]')
   }
   if (!input.root) throw new Error('prune requires root: absolute project root path')
 }
 
-// Batches keep every agent's file list bounded; grouping by top-level directory
-// keeps each batch coherent enough to judge cross-file structure.
+// Grouping by top-level directory keeps each batch coherent enough to judge
+// cross-file structure.
 const BATCH_SIZE = 15
-// The only hard cap. Convergence is otherwise decided by fresh agents:
-// a batch retires when its finder proposes nothing or its judge approves
-// nothing, and the loop ends when a full confirmation sweep applies nothing.
+// The only hard cap; convergence normally ends the loop first.
 const MAX_ROUNDS = 100
 
 // Finder and apply agents default to opus at high effort: judgment work needs
-// opus. A model override must bring its own effort — the pairing is the
+// opus. A model override must bring its own effort; the pairing is the
 // user's call. Judge and verify/fix agents are pinned to opus/high regardless
 // of the override (gatekeeping and failure attribution are judgment work);
-// hash agents stay on sonnet — purely mechanical work.
+// hash agents stay on sonnet, purely mechanical work.
 const simplifyOpts = input.model
   ? { model: input.model, effort: input.effort }
   : { model: 'opus', effort: 'high' }
@@ -90,10 +82,9 @@ const judgeOpts = { model: 'opus', effort: 'high' }
 
 const GROUPS = ['Performance improvements', 'Code simplifications', 'Bug fixes']
 
-// Finder brief for the find → judge → apply loop; $ARGUMENTS is filled per
-// batch. Self-contained on purpose — this workflow must not depend on
+// Self-contained on purpose: this workflow must not depend on
 // ~/.claude/skills/simplify/SKILL.md.
-const SIMPLIFY = `You are the FINDER in an automated find → judge → apply code-simplification loop. Read the code in scope and return every refinement worth making as a finding. Do not edit any files; separate agents apply the findings. An independent judge rejects any finding that is not a genuine improvement, and only approved findings are applied.
+const SIMPLIFY = `You are the FINDER in an automated code-simplification loop. Read the code in scope and return every refinement worth making as a finding. Do not edit any files; separate agents apply the findings. An independent judge rejects any finding that is not a genuine improvement, and only approved findings are applied.
 
 Propose refinements that:
 
@@ -250,8 +241,6 @@ const FIX_SCHEMA = {
   required: ['passed', 'fixed', 'remaining'],
 }
 
-// Comment-pruning rules and prompts, carried over verbatim from the
-// prune-comments workflow this phase replaces.
 const SCOPE_INSTRUCTIONS = {
   uncommitted: (base) => `First run \`git diff ${base} -- <file>\` to see the uncommitted changes, then Read the current file. Classify ONLY comments added or modified by those changes (lines inside the diff hunks, current working-tree state). Comments outside the changed hunks are out of scope.`,
   branch: (base) => `First run \`git diff ${base} -- <file>\` to see what this branch changed, then Read the current file. Classify ONLY comments added or modified by this branch (lines inside the diff hunks, current working-tree state). Comments outside the changed hunks are out of scope.`,
@@ -306,7 +295,6 @@ function fileListBlock(files) {
   return files.map(f => `- ${f}`).join('\n')
 }
 
-// Keeps fix-up prompts bounded on codebase-wide runs.
 function touchedBlock(files) {
   const shown = files.slice(0, 100)
   const extra = files.length - shown.length
@@ -351,12 +339,10 @@ async function runHash(cmd, label) {
 let discoveryFailed = false
 
 // Appliers declare what they create, but one that forgets leaves a file no
-// later phase can see. Listing the untracked tree and subtracting the baseline
-// captured before launch isolates exactly what appeared during the run;
-// everything the appliers did declare is already in `known`. Path quoting is
-// off because a quoted non-ASCII path names no file the later phases can open,
-// and the orchestrator captures the baseline with the same flag — turning it on
-// for one side of the subtraction alone would fabricate new files.
+// later phase can see. Path quoting is off because a quoted non-ASCII path
+// names no file the later phases can open, and the orchestrator captures the
+// baseline with the same flag; turning it on for one side of the subtraction
+// alone would fabricate new files.
 async function discoverUntracked() {
   let result = null
   // agent() throws once a user-set token budget is exhausted; this call sits at
@@ -374,11 +360,9 @@ Return every path it prints, verbatim, as \`untracked\`, relative to the project
   } catch {
     result = null
   }
-  // A dead discovery agent costs coverage, not correctness: the run proceeds
-  // with the declared creations alone, exactly as it did before.
   if (!result) {
     discoveryFailed = true
-    log('discovery agent died — undeclared new files, if any, will not be pruned or verified')
+    log('discovery agent died; undeclared new files, if any, will not be pruned or verified')
     return []
   }
   const before = new Set([...input.untrackedBaseline, ...known])
@@ -396,10 +380,8 @@ async function runCheck(label) {
 ${input.checkCmd}
 
 Report whether it passed. For every failure it reports (type error, test failure, lint error), return the implicated file path and a concise one-line message. The path must be relative to the project root, with no leading './' and never absolute. Do not edit any project files and do not attempt any fixes.`,
-      // Attributing failures to the right files is a judgment call — opus.
       { label, phase: 'Verify', schema: CHECK_SCHEMA, ...judgeOpts },
     )
-    // Null when the verifier agent dies; each caller decides what that means.
     return result
   } catch {
     return null
@@ -426,11 +408,10 @@ const possiblyEditedFiles = new Set()
 let proposedTotal = 0
 let approvedTotal = 0
 
-// Baseline check: failures that exist before any pass are not this run's to
-// fix and must never be attributed to it.
+// Failures that predate the run are never attributed to it.
 let baselineFailures = []
-// A check that fails while naming no file — a compiler rejecting its own
-// options, a suite aborting in global setup — is honestly reported as a failing
+// A check that fails while naming no file, like a compiler rejecting its own
+// options or a suite aborting in global setup, is honestly reported as a failing
 // baseline with an empty list, so the verdict has to be kept apart from the
 // list: the list alone would present that project as clean at baseline.
 let baselineFailing = false
@@ -450,14 +431,14 @@ if (input.checkCmd) {
   if (!baseline) {
     checkDisabled = true
     simplifyVerification = 'baseline-failed'
-    log('verification disabled: baseline check failed 3 times — no check failures will be attributed to this run')
+    log('verification disabled: baseline check failed 3 times; no check failures will be attributed to this run')
   } else {
     baselineFailures = baseline.failures
     baselineFailing = !baseline.passed
     if (baselineFailing) {
       log(baselineFailures.length
         ? `baseline check already failing: ${baselineFailures.length} pre-existing failure(s) will be ignored`
-        : 'baseline check already failing but named no file — no check failure will be attributed to this run')
+        : 'baseline check already failing but named no file; no check failure will be attributed to this run')
     }
   }
 }
@@ -523,11 +504,6 @@ function fixFailures(fix, cause) {
   return [{ file: UNATTRIBUTED, message: `check command still failing after the ${cause} fix-up, which named no specific failure` }]
 }
 
-// ---------------------------------------------------------------------------
-// Simplify loop: find → judge → apply per batch, retire batches that come up
-// empty, confirm with a full sweep of fresh finders.
-// ---------------------------------------------------------------------------
-
 function topDir(path) {
   return path.includes('/') ? path.slice(0, path.indexOf('/')) : '(root)'
 }
@@ -549,7 +525,7 @@ log(`${input.files.length} files across ${batches.length} batches (scope: ${inpu
 // The workflow harness caps a run at 1000 agents in total; each batch-round
 // costs up to three agents (find, judge, apply).
 if (batches.length > 80) {
-  log(`warning: ${batches.length} batches — the 1000-agent lifetime cap may end this run before convergence`)
+  log(`warning: ${batches.length} batches; the 1000-agent lifetime cap may end this run before convergence`)
 }
 
 const known = new Set(input.files)
@@ -557,18 +533,17 @@ const known = new Set(input.files)
 // A batch nobody could ever analyse is dropped rather than retried forever, so
 // its files leave no trace anywhere else in the result: this is the only record
 // that they were in scope and never looked at. A batch a finder did reach, or
-// an applier was dispatched against, is not one of those — it was looked at,
+// an applier was dispatched against, is not one of those: it was looked at,
 // and `abandonedAfterProgress` is where it is recorded; listing it here would
 // bury the never-looked-at files under ordinary transient agent flake.
 const unanalyzedFiles = []
 
 // The confirmation sweep is what `converged` speaks for, and it skips abandoned
-// batches — so a batch dropped after earlier rounds had already worked on it
+// batches, so a batch dropped after earlier rounds had already worked on it
 // leaves files whose settled state no fresh finder ever confirmed, with nothing
 // in `unanalyzedFiles` to say so.
 const abandonedAfterProgress = []
 
-// Diff-bounded scopes must say so, or the finder treats whole files as fair game.
 const scopeNote =
   input.scope === 'codebase'
     ? ''
@@ -595,9 +570,6 @@ function finderPrompt(batch, isSweep) {
 }
 
 function judgePrompt(findings, isSweep) {
-  // A sweep proposal that gets approved reactivates a settled batch. The
-  // judge gets that context and what an approval costs, but the standard
-  // stays the same — the verdict is the judge's, not the prompt's.
   const sweepNote = isSweep
     ? `\n\nContext: these proposals come from a confirmation sweep. Earlier rounds already refined this scope and every batch had settled, and an approval reopens it for another round. Judge each proposal on the same standard as any other. The sweep exists to catch what earlier rounds genuinely missed, not to relitigate choices they already made.`
     : ''
@@ -631,8 +603,6 @@ Other agents are editing other parts of this project concurrently, so project-wi
 Report every change you actually made in \`applied\`, each classified as one of: ${GROUPS.join(', ')}, with the files it touched; every file you created in \`createdFiles\`; and every finding you skipped in \`failed\`. Every path must be relative to the project root, with no leading './' and never absolute. For files you edited, use exactly the paths as they appear in the findings above.`
 }
 
-// A new file joins the batch owning its top-level directory so the next round
-// reviews it next to its neighbors.
 function assignNewFile(path) {
   const dir = topDir(path)
   // An abandoned batch is never visited again, so a file homed into one would
@@ -641,12 +611,12 @@ function assignNewFile(path) {
   if (target) {
     target.files.push(path)
     target.active = true
-    log(`new file ${path} → batch ${target.name}`)
+    log(`new file ${path} joins batch ${target.name}`)
   } else {
     const existing = batches.filter(b => b.group === dir).length
     const name = existing ? `${dir}#${existing + 1}` : dir
     batches.push({ name, group: dir, files: [path], active: true, visits: 0 })
-    log(`new file ${path} → new batch ${name}`)
+    log(`new file ${path} opens new batch ${name}`)
   }
 }
 
@@ -659,14 +629,14 @@ while (true) {
   let targets = batches.filter(b => b.active)
   let isSweep = false
   if (targets.length === 0) {
-    // Confirmation sweep: every batch — including every retired one — gets a
+    // Confirmation sweep: every batch, including every retired one, gets a
     // fresh finder before convergence is declared, catching cross-batch
     // fallout and prematurely retired work without dependency tracking.
     // Abandoned batches stay out: their agents would die again and the resulting
     // `roundHadDead` would block the sweep from ever confirming convergence.
     targets = batches.filter(b => !b.abandoned)
     // A sweep over nothing applies nothing and leaves the hash where it was,
-    // which is exactly the shape of convergence — so a run where every batch was
+    // which is exactly the shape of convergence, so a run where every batch was
     // abandoned would report the most reassuring stop reason for the worst
     // possible outcome. The two abandonment stories get their own stop reasons:
     // a scope no finder ever reached is a different report from one earlier
@@ -676,8 +646,8 @@ while (true) {
       stopReason = everAnalysed ? 'all-batches-abandoned-after-progress' : 'all-batches-abandoned'
       log(everAnalysed
         ? (treeEdited
-            ? 'every remaining batch was abandoned after repeated agent deaths — earlier rounds analysed part of the scope and an applier was dispatched, so the summary covers the work done so far'
-            : 'every remaining batch was abandoned after repeated agent deaths — earlier rounds analysed part of the scope without recording any change')
+            ? 'every remaining batch was abandoned after repeated agent deaths; earlier rounds analysed part of the scope and an applier was dispatched, so the summary covers the work done so far'
+            : 'every remaining batch was abandoned after repeated agent deaths; earlier rounds analysed part of the scope without recording any change')
         : 'every batch was abandoned before any round completed, so nothing was analysed')
       break
     }
@@ -721,7 +691,7 @@ while (true) {
         .filter((f, i) => !verdictFor(i)?.approved)
       if (approved.length === 0) return { status: 'all-rejected', proposed: prev.findings.length, rejected }
       // Recorded at dispatch, not from the report: an applier that edits and
-      // then dies — or whose stage throws on an exhausted budget — returns
+      // then dies, or whose stage throws on an exhausted budget, returns
       // nothing to count, and neither the discovery and fix-up gates nor an
       // abandoned batch's account of its own files may read that silence as an
       // untouched tree.
@@ -745,14 +715,14 @@ while (true) {
     const batch = targets[i]
     const r = results[i]
     // agent() resolves to null rather than throwing, so a dead finder, judge,
-    // or applier surfaces here: the batch was not (fully) processed — keep it
+    // or applier surfaces here: the batch was not (fully) processed, so keep it
     // active for a fresh attempt and block this round from confirming
     // convergence.
     if (!r || r.status === 'finder-dead' || r.status === 'judge-dead' || (r.status === 'applied' && !r.report)) {
       batch.active = true
       roundHadDead = true
-      // Fresh attempts, but a bounded number: a batch whose agents keep dying —
-      // or that the user skips every round — would otherwise stay active
+      // Fresh attempts, but a bounded number: a batch whose agents keep dying,
+      // or that the user skips every round, would otherwise stay active
       // forever, so no sweep could ever run and convergence would be
       // unreachable for the whole scope.
       batch.deadAttempts = (batch.deadAttempts ?? 0) + 1
@@ -761,13 +731,13 @@ while (true) {
         batch.abandoned = true
         if (!batch.analysed && !batch.applierDispatched) {
           unanalyzedFiles.push(...batch.files)
-          log(`batch ${batch.name} abandoned after ${batch.deadAttempts} dead agents — its files were never analysed`)
+          log(`batch ${batch.name} abandoned after ${batch.deadAttempts} dead agents; its files were never analysed`)
         } else if (batch.applierDispatched) {
           abandonedAfterProgress.push(...batch.files)
-          log(`batch ${batch.name} abandoned after ${batch.deadAttempts} dead agents — an applier was dispatched to it, so its files may have been edited without being reported`)
+          log(`batch ${batch.name} abandoned after ${batch.deadAttempts} dead agents; an applier was dispatched to it, so its files may have been edited without being reported`)
         } else {
           abandonedAfterProgress.push(...batch.files)
-          log(`batch ${batch.name} abandoned after ${batch.deadAttempts} dead agents — a finder did read its files, so they are not listed as unanalysed`)
+          log(`batch ${batch.name} abandoned after ${batch.deadAttempts} dead agents; a finder did read its files, so they are not listed as unanalysed`)
         }
       }
       if (r?.proposed) proposedTotal += r.proposed
@@ -775,15 +745,13 @@ while (true) {
       if (r?.rejected) allRejected.push(...r.rejected)
       continue
     }
-    // Powers the "this is visit N" prompt context only — not a budget.
+    // Powers the "this is visit N" prompt context only, not a budget.
     if (!isSweep) batch.visits++
     // Only back-to-back failures mean a batch is hopeless; without this reset,
     // two unrelated agent deaths rounds apart would abandon a batch that has
     // been analysed successfully in between.
     batch.deadAttempts = 0
     if (r.status === 'clean') {
-      // The finder found nothing: the batch retires until a sweep or a
-      // cross-batch edit revives it.
       batch.active = false
       continue
     }
@@ -801,7 +769,7 @@ while (true) {
     roundApplied += applied.length
     // A batch that actually changed stays active so a fresh finder re-examines
     // the new state; a batch whose applier applied nothing (every approved
-    // finding failed) has an unchanged tree and retires — the sweep re-looks.
+    // finding failed) has an unchanged tree and retires; the sweep re-looks.
     batch.active = applied.length > 0
     if ((report.failed ?? []).length) {
       log(`batch ${batch.name}: ${report.failed.length} approved finding(s) could not be applied`)
@@ -818,7 +786,7 @@ while (true) {
       for (const f of change.files ?? []) {
         if (!known.has(f)) continue
         // An edit in another batch's territory: give that batch a re-look now
-        // instead of waiting for the sweep. An abandoned owner is skipped —
+        // instead of waiting for the sweep. An abandoned owner is skipped;
         // reviving it would only spend two more rounds re-abandoning it.
         const owner = batches.find(b => b !== batch && !b.abandoned && b.files.includes(f))
         if (owner) revived.add(owner)
@@ -829,7 +797,7 @@ while (true) {
   // Applied only after every batch's own status is written: an owner at a later
   // index would otherwise overwrite its revival with its own clean/all-rejected
   // verdict, leaving the re-look to whichever sweep comes next. Abandonment is
-  // re-checked — the owner may have been abandoned after it was collected.
+  // re-checked; the owner may have been abandoned after it was collected.
   for (const b of revived) if (!b.abandoned) b.active = true
   for (const f of newFiles) assignNewFile(f)
   filesCreatedDuringRun.push(...newFiles)
@@ -840,14 +808,14 @@ while (true) {
   const treeHash = await runHash(input.hashCmd, `hash:tree@${iterations}`)
   if (!treeHash) {
     stopReason = 'hash-unavailable'
-    log(`round ${iterations}: hash agent could not return a hash — convergence cannot be confirmed; stopping and reporting the work done so far`)
+    log(`round ${iterations}: hash agent could not return a hash, so convergence cannot be confirmed; stopping and reporting the work done so far`)
     break
   }
   lastTreeHash = treeHash
   if (globalSeen.has(treeHash)) {
     if (isSweep && roundApplied === 0 && !roundHadDead) {
       stopReason = 'converged'
-      log(`round ${iterations}: sweep confirms convergence — no findings survived judging`)
+      log(`round ${iterations}: sweep confirms convergence; no findings survived judging`)
       break
     }
     log(`round ${iterations}: no new tree state`)
@@ -869,8 +837,8 @@ if (globalSeen.size > 1 || (treeEdited && stopReason === 'hash-unavailable')) {
   if (undeclaredFiles.length) {
     for (const f of undeclaredFiles) known.add(f)
     filesCreatedDuringRun.push(...undeclaredFiles)
-    // They arrive too late for the loop to simplify them — reopening it here
-    // would restart convergence — but the later phases still reach them: the
+    // They arrive too late for the loop to simplify them, as reopening it here
+    // would restart convergence, but the later phases still reach them: the
     // fix-up verifies them whenever it runs, and the prune phase classifies them
     // when it runs and their extension is one it was given.
     log(`${undeclaredFiles.length} file(s) appeared during the run without being declared: ${touchedBlock(undeclaredFiles)}`)
@@ -878,13 +846,13 @@ if (globalSeen.size > 1 || (treeEdited && stopReason === 'hash-unavailable')) {
 }
 
 // Loop agents never run project-wide commands, so this quiet point is where
-// the project gets verified — and repaired — regardless of how the loop ended.
+// the project gets verified and repaired, regardless of how the loop ended.
 // Gated as discovery is: an unmoved tree has nothing to verify, and a dispatched
 // applier only speaks for a run whose hash never came back.
 if (input.checkCmd && !checkDisabled && (globalSeen.size > 1 || (treeEdited && stopReason === 'hash-unavailable'))) {
   // Same `known` gate as the loop on the dispatched targets: an out-of-scope
   // path there is a proposal this run never owned. A path in `allChanges` is a
-  // report of a real edit — in scope or not, it is where breakage may be.
+  // report of a real edit; in scope or not, it is where breakage may be.
   const touched = [...new Set([
     ...allChanges.flatMap(c => c.files ?? []),
     ...[...possiblyEditedFiles].filter(f => known.has(f)),
@@ -893,7 +861,7 @@ if (input.checkCmd && !checkDisabled && (globalSeen.size > 1 || (treeEdited && s
   const fix = await runFix('fix:simplify', touched, 'code-simplification')
   if (!fix) {
     simplifyVerification = 'fixup-died'
-    log('fix-up agent died — project state unverified')
+    log('fix-up agent died; project state unverified')
   } else {
     simplifyVerification = 'ran'
     outstandingFailures = fixFailures(fix, 'code-simplification')
@@ -916,15 +884,13 @@ if (input.checkCmd && !checkDisabled && (globalSeen.size > 1 || (treeEdited && s
     if (postFixHash) {
       lastTreeHash = postFixHash
     } else {
-      log('hash agent could not return a hash after the fix-up — the prune phase seeds from the pre-fix tree state')
+      log('hash agent could not return a hash after the fix-up; the prune phase seeds from the pre-fix tree state')
     }
   }
 }
 
-// ---------------------------------------------------------------------------
-// Comment-pruning phase: starts only once simplification has converged, so
-// classify agents never audit comments in code a later pass would rewrite.
-// ---------------------------------------------------------------------------
+// Pruning starts only once simplification has converged, so classify agents
+// never audit comments in code a later pass would rewrite.
 let prune = null
 if (input.prune && stopReason === 'converged') {
   // Extension comes from the basename only: a dotted directory name must not
@@ -934,9 +900,6 @@ if (input.prune && stopReason === 'converged') {
     const i = base.lastIndexOf('.')
     return i > 0 ? base.slice(i) : ''
   }
-  // Files that appeared during the run — declared creations and undeclared
-  // ones alike — join the untracked candidates when their extension is one the
-  // orchestrator filtered its own candidate lists on.
   const trackedPruneFiles = input.pruneFiles ?? []
   const untrackedPruneFiles = input.pruneUntrackedFiles ?? []
   const alreadyListed = new Set([...trackedPruneFiles, ...untrackedPruneFiles])
@@ -944,7 +907,7 @@ if (input.prune && stopReason === 'converged') {
   const createdPruneFiles = filesCreatedDuringRun.filter(f => pruneExts.has(extOf(f)) && !alreadyListed.has(f))
   // The tracked candidate list was frozen before launch from the pre-run diff, so
   // a file that carried no comment then is absent from it even after an applier
-  // wrote one into it — including an applier that died before reporting, which is
+  // wrote one into it, including an applier that died before reporting, which is
   // why the files it was merely dispatched against count too. A file it turned out
   // not to touch costs one classify pass that returns nothing. Same `known` gate as
   // the loop: a path outside the scope is an out-of-scope edit, not a reason to
@@ -953,7 +916,7 @@ if (input.prune && stopReason === 'converged') {
     .filter(f => known.has(f) && pruneExts.has(extOf(f)) && !alreadyListed.has(f) && !filesCreatedDuringRun.includes(f))
   // A file that was already untracked at launch has no diff against the base, so
   // a diff-bounded instruction would classify nothing in it and retire its batch
-  // as clean — reporting a comment as audited that no agent was asked to read.
+  // as clean, reporting a comment as audited that no agent was asked to read.
   const editedFresh = editedTracked.filter(f => wholeFile.has(f))
   const editedDiffBounded = editedTracked.filter(f => !wholeFile.has(f))
   const wholeFilePruneFiles = [...untrackedPruneFiles, ...createdPruneFiles, ...editedFresh]
@@ -961,9 +924,6 @@ if (input.prune && stopReason === 'converged') {
 
   const BATCH = 5
   let activeBatches = []
-  // An untracked file has no diff against the base, so a diff-bounded scope
-  // instruction would classify nothing in it: untracked and created files batch
-  // separately and always get the whole-file instruction.
   function addBatches(files, instruction) {
     for (let i = 0; i < files.length; i += BATCH) {
       activeBatches.push({ id: activeBatches.length + 1, files: files.slice(i, i + BATCH), instruction })
@@ -994,15 +954,15 @@ Do NOT edit anything. Return the candidates with exact file, approximate line nu
       ({ batch, res }) => {
         // agent() resolves to null rather than throwing, so a dead or skipped
         // classifier is indistinguishable from an empty candidate list unless
-        // the two are split here — and retiring it as clean would report files
+        // the two are split here; retiring it as clean would report files
         // as audited that no agent ever read.
         if (!res) {
-          log(`prune: classify agent for batch ${batch.id} did not answer — its files are unaudited so far`)
+          log(`prune: classify agent for batch ${batch.id} did not answer; its files are unaudited so far`)
           return { batch, removed: 0, skipped: [], clean: false, dead: true }
         }
         if (res.candidates.length === 0) return { batch, removed: 0, skipped: [], clean: true }
         // Recorded at dispatch, not from the report: a remover that edits and
-        // then dies — or whose stage throws on an exhausted budget — reports no
+        // then dies, or whose stage throws on an exhausted budget, reports no
         // removals, and the fix-up gate must still open for the broken syntax it
         // may have left behind.
         pruneEdited = true
@@ -1026,8 +986,6 @@ ${JSON.stringify(res.candidates, null, 2)}`,
   let pruneIterations = 0
   let pruneStop = 'converged'
   let incompleteRetries = 0
-  // Same reason as `treeEdited` in the simplify phase: the fix-up is gated on
-  // the tree having moved, and a dead hash agent leaves no other trace of it.
   let pruneEdited = false
   let pruneVerification = 'not-configured'
   if (input.checkCmd) pruneVerification = checkDisabled ? 'baseline-failed' : 'no-changes'
@@ -1052,14 +1010,14 @@ ${JSON.stringify(res.candidates, null, 2)}`,
     if (!incomplete) incompleteRetries = 0
     // A skip never moves the tree, so accumulating skips only on the branch
     // where the hash moved would lose every skip reason from the pass that ends
-    // the loop — usually the pass whose agents defended everything they saw.
+    // the loop, usually the pass whose agents defended everything they saw.
     skipped.push(...ok.flatMap((r) => r.skipped))
 
     // A batch whose classifier keeps dying gets fresh attempts, but only a
     // bounded number: a user who skips the same agent every pass would
     // otherwise keep the loop alive until the round backstop. Only back-to-back
     // deaths mean a batch is unreachable, so a classifier that answered clears
-    // the tally — without the reset, two flakes passes apart would drop a batch
+    // the tally; without the reset, two flakes passes apart would drop a batch
     // that has been classified and pruned in between.
     for (const r of ok) {
       if (!r.dead) {
@@ -1069,15 +1027,14 @@ ${JSON.stringify(res.candidates, null, 2)}`,
       r.batch.deadAttempts = (r.batch.deadAttempts ?? 0) + 1
       if (r.batch.deadAttempts >= 2) {
         unauditedFiles.push(...r.batch.files)
-        log(`prune: batch ${r.batch.id} abandoned after ${r.batch.deadAttempts} consecutive classify agents died — it never produced a clean pass, so its comments may not be fully audited`)
+        log(`prune: batch ${r.batch.id} abandoned after ${r.batch.deadAttempts} consecutive classify agents died; it never produced a clean pass, so its comments may not be fully audited`)
       }
     }
     const abandonedIds = new Set(ok.filter((r) => r.dead && r.batch.deadAttempts >= 2).map((r) => r.batch.id))
 
-    // Retire batches that produced no candidates. Re-classifying a settled
-    // batch every pass invites agents to justify the visit by flagging
-    // borderline comments, so the tree keeps changing and the hash never
-    // repeats.
+    // Re-classifying a settled batch every pass invites agents to justify the
+    // visit by flagging borderline comments, so the tree keeps changing and
+    // the hash never repeats.
     const cleanIds = new Set(ok.filter((r) => r.clean).map((r) => r.batch.id))
     activeBatches = activeBatches.filter((b) => !cleanIds.has(b.id) && !abandonedIds.has(b.id))
     batchesDone += cleanIds.size
@@ -1089,21 +1046,21 @@ ${JSON.stringify(res.candidates, null, 2)}`,
       // loop are real, and counting them only where the hash moved would report
       // an edited tree as one nothing was removed from.
       removed += passRemoved
-      log(`prune ${pruneIterations}: hash agent could not return a hash — a settled tree cannot be confirmed; stopping and reporting the work done so far`)
+      log(`prune ${pruneIterations}: hash agent could not return a hash, so a settled tree cannot be confirmed; stopping and reporting the work done so far`)
       break
     }
     if (pruneSeen.has(hash)) {
       // One more attempt for the batches an agent left unfinished, then out: a
-      // failure that keeps repeating — a user skipping every remove agent, an
-      // exhausted budget — would otherwise re-run it until the round backstop.
+      // failure that keeps repeating, like a user skipping every remove agent
+      // or an exhausted budget, would otherwise re-run it until the round backstop.
       if (incomplete && activeBatches.length && incompleteRetries < 1) {
         incompleteRetries++
-        log(`prune ${pruneIterations}: no new tree state, but an agent died with candidates outstanding — retrying its batch`)
+        log(`prune ${pruneIterations}: no new tree state, but an agent died with candidates outstanding; retrying its batch`)
         continue
       }
       if (incomplete) {
         pruneStop = 'incomplete-dead-agent'
-        log(`prune ${pruneIterations}: agents kept dying with candidates outstanding — stopping with batches unfinished`)
+        log(`prune ${pruneIterations}: agents kept dying with candidates outstanding; stopping with batches unfinished`)
         break
       }
       stable++
@@ -1131,14 +1088,14 @@ ${JSON.stringify(res.candidates, null, 2)}`,
   // all has to fall back on a remover having been dispatched.
   if (input.checkCmd && !checkDisabled && (pruneSeen.size > 1 || (pruneEdited && pruneStop === 'hash-unavailable'))) {
     // This fix-up runs last on the final tree, so it adjudicates what the
-    // simplify fix-up left broken too — otherwise its verdict would replace a
+    // simplify fix-up left broken too; otherwise its verdict would replace a
     // failure it was never told about.
     const carried = outstandingFailures
     const touched = [...new Set([...pruneList, ...carried.map((f) => f.file).filter((f) => f !== UNATTRIBUTED)])]
     const fix = await runFix('fix:prune', touched, 'comment-pruning', carried)
     if (!fix) {
       pruneVerification = 'fixup-died'
-      log('prune fix-up agent died — project state unverified')
+      log('prune fix-up agent died; project state unverified')
     } else {
       pruneVerification = 'ran'
       outstandingFailures = fixFailures(fix, 'comment-pruning')
