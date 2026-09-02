@@ -4,7 +4,7 @@ description: Launches an adversarial code review workflow on the branch, auto-fi
 disable-model-invocation: true
 ---
 
-First scout the full branch diff against the merge-base with main, including uncommitted changes, yourself: read it and pick the review dimensions the diff plausibly touches. Then launch an adversarial code review dynamic workflow over that diff with the following phases:
+Scout only the shape of the branch diff against the merge-base with main, including uncommitted changes: `git diff --stat` plus the changed file paths. Pick the review dimensions from those paths and sizes; the finders read the hunks. Then launch an adversarial code review dynamic workflow over that diff with the following phases:
 - Find (Opus): specialized finders, one per dimension you picked while scouting.
 - Verify (Opus): each finding goes to two adversarial skeptics, one attacking technical truth, one attacking materiality, each refuting by default when uncertain. A finding is confirmed only if neither skeptic can kill it.
   - The technical skeptic's verdict is three-way: refute, confirm as corrected, or confirm as-is. A wrong detail in the finding (bad arithmetic, a misattributed cause, an overstated scenario) is only a kill ground when the failure mechanism collapses with it; when the skeptic's own verification shows the underlying defect is real in a corrected form at the same location, it confirms the finding with the corrected description, and downstream phases (materiality, classifier, implementer) work from that corrected description. Uncertainty about whether the mechanism is real at all still defaults to refute, and a correction must be something the skeptic actually verified, not a charitable reinterpretation of the finder's claim.
