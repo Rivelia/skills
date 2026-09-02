@@ -1,6 +1,6 @@
 export const meta = {
   name: 'simplify-converge',
-  description: 'Loop simplification rounds (find, judge, apply) over a scope until fresh finders come up empty; optionally prune non-useful comments once converged',
+  description: 'Loop simplification rounds (find, judge, apply) over a scope until fresh finders come up empty, then prune non-useful comments once converged',
   phases: [
     { title: 'Find', detail: 'read-only agents propose simplifications per batch', model: 'opus' },
     { title: 'Judge', detail: 'independent gatekeepers strike proposals that are not genuine improvements', model: 'opus' },
@@ -46,23 +46,22 @@ if (input.model && !EFFORTS.includes(input.effort)) {
   throw new Error(`when model is overridden, effort must also be chosen: one of ${EFFORTS.join(', ')}`)
 }
 
-if (input.prune) {
-  // Two empty lists are a legitimate launch: a diff that adds no comment and no
-  // untracked source still leaves the comments the simplify phase itself writes
-  // to classify. An absent key is a different thing: an orchestrator that
-  // computed candidates and failed to pass them would silently narrow the audit
-  // to the files the run touched.
-  for (const key of ['pruneFiles', 'pruneUntrackedFiles']) {
-    if (input[key] === undefined) throw new Error(`prune requires ${key}: string[]; pass [] for a list with no candidates`)
-    if (!Array.isArray(input[key])) throw new Error(`${key} must be string[] when given`)
-  }
-  // Files that appear mid-run are not in either candidate list, so the script
-  // needs the orchestrator's own extension filter to judge them by.
-  if (!Array.isArray(input.pruneExts) || input.pruneExts.length === 0) {
-    throw new Error('prune requires pruneExts: string[], the extensions the candidate lists were filtered on, e.g. [".ts", ".js", ".svelte"]')
-  }
-  if (!input.root) throw new Error('prune requires root: absolute project root path')
+// Pruning always follows convergence, so its inputs are always required. Two
+// empty lists are a legitimate launch: a diff that adds no comment and no
+// untracked source still leaves the comments the simplify phase itself writes
+// to classify. An absent key is a different thing: an orchestrator that
+// computed candidates and failed to pass them would silently narrow the audit
+// to the files the run touched.
+for (const key of ['pruneFiles', 'pruneUntrackedFiles']) {
+  if (input[key] === undefined) throw new Error(`${key}: string[] is required; pass [] for a list with no candidates`)
+  if (!Array.isArray(input[key])) throw new Error(`${key} must be string[]`)
 }
+// Files that appear mid-run are not in either candidate list, so the script
+// needs the orchestrator's own extension filter to judge them by.
+if (!Array.isArray(input.pruneExts) || input.pruneExts.length === 0) {
+  throw new Error('pruneExts: string[] is required, the extensions the candidate lists were filtered on, e.g. [".ts", ".js", ".svelte"]')
+}
+if (!input.root) throw new Error('root: absolute project root path is required')
 
 // Grouping by top-level directory keeps each batch coherent enough to judge
 // cross-file structure.
@@ -875,11 +874,11 @@ if (input.checkCmd && !checkDisabled && (globalSeen.size > 1 || (treeEdited && s
   // Only a fix-up that ran the check clean and touched nothing proves the tree
   // still matches the last hash; a dead one, or one that edited and reported the
   // attempt only in `remaining`, leaves it ahead. The prune phase is the sole
-  // consumer of the refreshed value, so runs without one skip the agent. A
+  // consumer of the refreshed value, so an unstable run skips the agent. A
   // failed hash keeps the pre-fix seed: it costs one extra prune pass, where an
   // unseeded set would let the first pass look settled.
   const fixLeftTreeIntact = fix && fix.passed && !fix.fixed.length && !fix.remaining.length
-  if (input.prune && stopReason === 'converged' && !fixLeftTreeIntact) {
+  if (stopReason === 'converged' && !fixLeftTreeIntact) {
     const postFixHash = await runHash(input.hashCmd, 'hash:tree@postfix')
     if (postFixHash) {
       lastTreeHash = postFixHash
@@ -891,8 +890,8 @@ if (input.checkCmd && !checkDisabled && (globalSeen.size > 1 || (treeEdited && s
 
 // Pruning starts only once simplification has converged, so classify agents
 // never audit comments in code a later pass would rewrite.
-let prune = null
-if (input.prune && stopReason === 'converged') {
+let prune
+if (stopReason === 'converged') {
   // Extension comes from the basename only: a dotted directory name must not
   // supply an extension.
   function extOf(f) {
@@ -1109,7 +1108,7 @@ ${JSON.stringify(res.candidates, null, 2)}`,
   // cannot say the tree moved; the pass hashes can, though a pre-fix seed
   // leaves the first of them counting the simplify fix-up's edits.
   prune = { iterations: pruneIterations, stopReason: pruneStop, distinctTreeStates: pruneSeen.size - 1, removed, skipped: [...new Set(skipped)], batchesDone, batchesTotal, unauditedFiles, verificationStatus: pruneVerification }
-} else if (input.prune) {
+} else {
   prune = { stopReason: 'skipped-simplify-unstable' }
 }
 

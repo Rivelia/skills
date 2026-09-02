@@ -1,16 +1,16 @@
 ---
 name: simplify-workflow
-description: Loop simplification rounds (find, judge, apply) over a scope (uncommitted | branch | unpushed | codebase) via a Workflow until fresh finders come up empty, with an optional comment-pruning phase.
+description: Loop simplification rounds (find, judge, apply) over a scope (uncommitted | branch | unpushed | codebase) via a Workflow until fresh finders come up empty, then prune non-useful comments.
+argument-hint: "<uncommitted|branch|unpushed|codebase> [model effort]"
 disable-model-invocation: true
 ---
 
-A Workflow converges the scoped code to a stable simplified form. Each round runs find, judge, apply over batches of files: fresh finders propose, independent judges strike what is not a genuine improvement, and appliers implement only what survives. Rounds repeat until a confirmation sweep applies nothing and the tree hash lands on an already-seen state. When pruning is requested, a comment-pruning phase follows convergence. You orchestrate from outside the loop: resolve the inputs, launch the workflow, relay its result. The loop mechanics, embedded prompts, and comment-classification rules live in [simplify.mjs](simplify.mjs) in this skill's folder.
+A Workflow converges the scoped code to a stable simplified form. Each round runs find, judge, apply over batches of files: fresh finders propose, independent judges strike what is not a genuine improvement, and appliers implement only what survives. Rounds repeat until a confirmation sweep applies nothing and the tree hash lands on an already-seen state. A comment-pruning phase follows convergence. You orchestrate from outside the loop: resolve the inputs, launch the workflow, relay its result. The loop mechanics, embedded prompts, and comment-classification rules live in [simplify.mjs](simplify.mjs) in this skill's folder.
 
 ## Steps
 
 1. **Resolve the arguments.** Parse them in this exact order; every "ask the user" below means ask and stop, without launching anything.
-   - Remove the word `prune` from the argument list wherever it appears; its presence enables the comment-pruning phase.
-   - The first remaining argument is the scope and must be exactly one of `uncommitted`, `branch`, `unpushed`, `codebase`; if it is missing or anything else, ask the user which scope to use.
+   - The first argument is the scope and must be exactly one of `uncommitted`, `branch`, `unpushed`, `codebase`; if it is missing or anything else, ask the user which scope to use.
    - After the scope, what remains must be nothing, `[model]`, or `[model] [effort]`, in that order and nothing else.
    - The model must be a plausible model name (e.g. `opus`, `sonnet`, `haiku`). If the token after the scope is not a model name, ask the user what they meant. An effort is one of `low`, `medium`, `high`, `xhigh`, `max`. If a model is given without a following effort, ask the user which effort to use; the model/effort pairing is the user's call, never defaulted.
    - Any further leftover argument: ask the user what it means.
@@ -51,9 +51,9 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
 
    If the list is empty, report that there is nothing to simplify and stop without launching the workflow; it rejects an empty `files` array.
 
-4. **Resolve the base ref** bounding the diff: `HEAD` for `uncommitted`, the step-2 merge-base for `branch` and `unpushed` (each its own), none for `codebase`. It is required for every non-`codebase` scope, pruning or not.
+4. **Resolve the base ref** bounding the diff: `HEAD` for `uncommitted`, the step-2 merge-base for `branch` and `unpushed` (each its own), none for `codebase`. It is required for every non-`codebase` scope.
 
-   **Build the prune candidate lists** (only when pruning is enabled), holding only code files that can contain comments (e.g. `.ts`, `.svelte`, `.js`). Neither list may ever name a path step 3's exclusions would have dropped for this scope: a vendored, generated, built or minified file the workflow was told not to simplify must not be reachable by a remove agent either. The workflow classifies tracked candidates diff-bounded and untracked ones whole-file, hence two lists:
+   **Build the prune candidate lists**, holding only code files that can contain comments (e.g. `.ts`, `.svelte`, `.js`). Neither list may ever name a path step 3's exclusions would have dropped for this scope: a vendored, generated, built or minified file the workflow was told not to simplify must not be reachable by a remove agent either. The workflow classifies tracked candidates diff-bounded and untracked ones whole-file, hence two lists:
    - `pruneFiles`, the tracked candidates:
      - `uncommitted` / `branch` / `unpushed`: files changed vs the base whose diff adds a comment, e.g.
 
@@ -75,7 +75,7 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
        | while IFS= read -r f; do [ -f "$f" ] && grep -qE '(//|/\*|<!--)' "$f" && echo "$f"; done || :
      ```
 
-   An empty list is still passed, as `[]`, and `prune`, `pruneExts`, and `root` with it; even with both lists empty, the workflow classifies the comments the simplify phase itself introduces.
+   An empty list is still passed, as `[]`; even with both lists empty, the workflow classifies the comments the simplify phase itself introduces.
 
    Also pass `pruneExts`, the extensions you filtered these lists on, e.g. `[".ts", ".js", ".svelte"]`. It is the set of comment-carrying source extensions for this repo, not narrowed to the extensions that happen to occur in the lists; the workflow judges files that appear mid-run by it.
 
@@ -85,29 +85,34 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
    - the step-2 hash command, keeping the 64-character hex hash;
    - `git -c core.quotePath=false ls-files -o --exclude-standard`, keeping every path as `untrackedBaseline`. The workflow subtracts this set from a later listing to find files that appeared during the run, including any an apply agent created without declaring. Pass it **raw**: unlike `files` and the prune lists, do not filter it; a path filtered out here looks like a file the run created.
 
-7. **Launch the workflow.** First resolve the absolute path of [simplify.mjs](simplify.mjs); it sits next to this SKILL.md, in the directory named by the `Base directory for this skill:` line of this skill's invocation. Substitute the resolved path below:
+7. **Copy the script, then launch the workflow.** Workflow only accepts a `scriptPath` this session wrote, so it rejects [simplify.mjs](simplify.mjs) where it sits, next to this SKILL.md in the directory named by the `Base directory for this skill:` line of this skill's invocation. Copy it to a fresh temporary directory via Bash and keep the printed path:
+
+   ```sh
+   d=$(mktemp -d /tmp/simplify-workflow.XXXXXX) && cp "<base directory>/simplify.mjs" "$d/simplify.mjs" && echo "$d/simplify.mjs"
+   ```
+
+   Substitute that path below:
 
    ```
    Workflow({
-     scriptPath: "<absolute path to simplify.mjs>",
-     args: { scope: "<scope>", hashCmd: "<hash command>", baselineHash: "<baseline>", untrackedBaseline: [<raw untracked listing>], files: [<file list>], checkCmd: "<check command, omit when not found>", model: "<model, omit when not given>", effort: "<effort, required with model, omit otherwise>", prune: true (omit when pruning is off), pruneFiles: [<tracked prune candidates>], pruneUntrackedFiles: [<untracked prune candidates>], pruneExts: [<comment-carrying source extensions>], base: "<step-4 base ref, required for every scope except codebase, where it is omitted>", root: "<absolute project root>" }
+     scriptPath: "<path of the copied simplify.mjs>",
+     args: { scope: "<scope>", hashCmd: "<hash command>", baselineHash: "<baseline>", untrackedBaseline: [<raw untracked listing>], files: [<file list>], checkCmd: "<check command, omit when not found>", model: "<model, omit when not given>", effort: "<effort, required with model, omit otherwise>", pruneFiles: [<tracked prune candidates>], pruneUntrackedFiles: [<untracked prune candidates>], pruneExts: [<comment-carrying source extensions>], base: "<step-4 base ref, required for every scope except codebase, where it is omitted>", root: "<absolute project root>" }
    })
    ```
 
-   Pass `files`, `untrackedBaseline`, `pruneFiles`, `pruneUntrackedFiles`, and `pruneExts` as real JSON arrays, not JSON-encoded strings. `untrackedBaseline` is always required (pass `[]` when the working tree has no untracked files); `prune`, `pruneExts`, `root`, and both prune lists are only needed when pruning is enabled.
+   Pass `files`, `untrackedBaseline`, `pruneFiles`, `pruneUntrackedFiles`, and `pruneExts` as real JSON arrays, not JSON-encoded strings. Every array is required: pass `[]` when the working tree has no untracked files or a prune list has no candidates.
 
    The workflow returns `{scope, iterations, sweeps, stopReason, distinctTreeStates, findingsProposed, findingsApproved, rejectedFindings, changesApplied, undeclaredFiles, unanalyzedFiles, abandonedAfterProgress, discoveryFailed, unresolvedCheckFailures, verificationStatus, checkBaselineFailing, prune, summary}`. Step 8 defines how to read and report every field; semantics beyond what it states live in [simplify.mjs](simplify.mjs).
 
-8. **Report.** Relay `summary` grouped under its three headings (`Performance improvements`, `Code simplifications`, `Bug fixes`), plus the round count (`iterations`), the sweep count (`sweeps`), and the proposed/approved/applied counts (`findingsProposed`, `findingsApproved`, `changesApplied`); the gap between proposed and approved is the judge doing its job. Relay every entry in `rejectedFindings` under its own heading, with its description, its files, and the judge's reason, so the user sees what the judges struck and why. Leave the changes uncommitted; that holds on every run, pruning or not. Then obey every row of the table below whose condition holds; a row may impose an action or a prohibition, not only a line of report. Three shorthands:
+8. **Report.** Relay `summary` grouped under its three headings (`Performance improvements`, `Code simplifications`, `Bug fixes`), plus the round count (`iterations`), the sweep count (`sweeps`), and the proposed/approved/applied counts (`findingsProposed`, `findingsApproved`, `changesApplied`); the gap between proposed and approved is the judge doing its job. Relay every entry in `rejectedFindings` under its own heading, with its description, its files, and the judge's reason, so the user sees what the judges struck and why. Leave the changes uncommitted. Then obey every row of the table below whose condition holds; a row may impose an action or a prohibition, not only a line of report. Three shorthands:
 
-   - A **full prune object** is a `prune` that is neither null nor `{stopReason: "skipped-simplify-unstable"}`. In those two states no other `prune` field exists, so no row that names one applies.
+   - A **full prune object** is a `prune` other than `{stopReason: "skipped-simplify-unstable"}`. In that state no other `prune` field exists, so no row that names one applies.
    - **Edited** means `changesApplied` is non-zero, or `distinctTreeStates` is non-zero, or a full prune object reports a non-zero `removed` or a non-zero `distinctTreeStates`. `distinctTreeStates` counts the tree states a phase's round hashes reached beyond its starting state, ground-truth proof of an edit even when no agent lived to report one.
    - **Edit possible** means `stopReason` is `hash-unavailable`, or a full prune object's `stopReason` is `hash-unavailable`; an applier or remover may have written before that phase lost track of the tree.
 
    | When | Report |
    | --- | --- |
-   | `prune` is null | Say nothing about pruning; it was never requested. No row naming a `prune` field applies. |
-   | `prune` is non-null and its `stopReason` is `skipped-simplify-unstable` | State that pruning was skipped because simplification never converged, naming the top-level `stopReason` as what it stopped on. No other row naming a `prune` field applies. |
+   | `prune.stopReason` is `skipped-simplify-unstable` | State that pruning was skipped because simplification never converged, naming the top-level `stopReason` as what it stopped on. No other row naming a `prune` field applies. |
    | `prune` is a full prune object | Report `prune.removed`, every `prune.skipped` entry with its reason, `prune.batchesDone`/`prune.batchesTotal`, and `prune.iterations`. |
    | `unanalyzedFiles` is non-empty | List those paths and say they were never analysed because their batch's agents kept dying or were skipped, so the rest of the scope could still converge; drop that last clause when `stopReason` is `all-batches-abandoned`, where there is no rest. |
    | `undeclaredFiles` is non-empty | List those paths and say they were never simplified. An apply agent created them without reporting them, so they missed the simplify loop. |
@@ -136,4 +141,4 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
    | Full prune object whose `stopReason` is `all-batches-clean` | Report it as the expected healthy outcome, every batch audited until it produced no further candidates, and add no caveat of your own. |
    | Full prune object whose `stopReason` is `converged` | Say the tree stopped moving while batches were still active, so the remaining `prune.batchesTotal - prune.batchesDone` batches never produced a clean pass. |
 
-   Four notes on rows that interact. The `all-batches-clean` row licenses no silence: the `prune.unauditedFiles` and `abandonedAfterProgress` rows override it and still fire. `unanalyzedFiles` and `abandonedAfterProgress` are disjoint lists telling two different failure stories; never merge them into one list. The `skipped-simplify-unstable` row is the only place pruning-was-skipped is reported, so the abandonment rows do not repeat it and a run that never asked for pruning never hears about it. `scope` and `distinctTreeStates` are not reported to the user directly; `distinctTreeStates` is only ever a condition here.
+   Four notes on rows that interact. The `all-batches-clean` row licenses no silence: the `prune.unauditedFiles` and `abandonedAfterProgress` rows override it and still fire. `unanalyzedFiles` and `abandonedAfterProgress` are disjoint lists telling two different failure stories; never merge them into one list. The `skipped-simplify-unstable` row is the only place pruning-was-skipped is reported, so the abandonment rows do not repeat it. `scope` and `distinctTreeStates` are not reported to the user directly; `distinctTreeStates` is only ever a condition here.
