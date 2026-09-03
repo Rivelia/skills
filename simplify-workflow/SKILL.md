@@ -12,7 +12,7 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
 1. **Resolve the arguments.** Parse them in this exact order; every "ask the user" below means ask and stop, without launching anything.
    - The first argument is the scope and must be exactly one of `uncommitted`, `branch`, `unpushed`, `codebase`; if it is missing or anything else, ask the user which scope to use.
    - After the scope, what remains must be nothing, `[model]`, or `[model] [effort]`, in that order and nothing else.
-   - The model must be a plausible model name (e.g. `opus`, `sonnet`, `haiku`). If the token after the scope is not a model name, ask the user what they meant. An effort is one of `low`, `medium`, `high`, `xhigh`, `max`. If a model is given without a following effort, ask the user which effort to use; the model/effort pairing is the user's call, never defaulted.
+   - The model must be a plausible model name (e.g. `opus`, `sonnet`, `haiku`). If the token after the scope is not a model name, ask the user what they meant. An effort is one of `low`, `medium`, `high`, `xhigh`, `max`. If a model is given without a following effort, ask the user which effort to use; the model/effort pairing is the user's call, never defaulted. The override drives the find, apply, classify and remove agents; the judge and the verify agents keep the fixed models set in [simplify.mjs](simplify.mjs).
    - Any further leftover argument: ask the user what it means.
 
 2. **Build the hash command** for the scope. This exact string is the single source of truth for change detection: you run it once for the baseline, and the workflow reruns it verbatim as the convergence gate every iteration.
@@ -85,17 +85,11 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
    - the step-2 hash command, keeping the 64-character hex hash;
    - `git -c core.quotePath=false ls-files -o --exclude-standard`, keeping every path as `untrackedBaseline`. The workflow subtracts this set from a later listing to find files that appeared during the run, including any an apply agent created without declaring. Pass it **raw**: unlike `files` and the prune lists, do not filter it; a path filtered out here looks like a file the run created.
 
-7. **Copy the script, then launch the workflow.** Workflow only accepts a `scriptPath` this session wrote, so it rejects [simplify.mjs](simplify.mjs) where it sits, next to this SKILL.md in the directory named by the `Base directory for this skill:` line of this skill's invocation. Copy it to a fresh temporary directory via Bash and keep the printed path:
-
-   ```sh
-   d=$(mktemp -d /tmp/simplify-workflow.XXXXXX) && cp "<base directory>/simplify.mjs" "$d/simplify.mjs" && echo "$d/simplify.mjs"
-   ```
-
-   Substitute that path below:
+7. **Launch the workflow.** First resolve the absolute path of [simplify.mjs](simplify.mjs); it sits next to this SKILL.md, in the directory named by the `Base directory for this skill:` line of this skill's invocation. Substitute the resolved path below:
 
    ```
    Workflow({
-     scriptPath: "<path of the copied simplify.mjs>",
+     scriptPath: "<absolute path to simplify.mjs>",
      args: { scope: "<scope>", hashCmd: "<hash command>", baselineHash: "<baseline>", untrackedBaseline: [<raw untracked listing>], files: [<file list>], checkCmd: "<check command, omit when not found>", model: "<model, omit when not given>", effort: "<effort, required with model, omit otherwise>", pruneFiles: [<tracked prune candidates>], pruneUntrackedFiles: [<untracked prune candidates>], pruneExts: [<comment-carrying source extensions>], base: "<step-4 base ref, required for every scope except codebase, where it is omitted>", root: "<absolute project root>" }
    })
    ```

@@ -4,10 +4,10 @@ export const meta = {
   phases: [
     { title: 'Find', detail: 'read-only agents propose simplifications per batch', model: 'opus' },
     { title: 'Judge', detail: 'independent gatekeepers strike proposals that are not genuine improvements', model: 'opus' },
-    { title: 'Apply', detail: 'implement the approved findings per batch', model: 'opus' },
+    { title: 'Apply', detail: 'implement the approved findings per batch', model: 'fable' },
     { title: 'Hash', detail: 'deterministic tree hash after each round', model: 'sonnet' },
     { title: 'Discover', detail: 'list untracked files the appliers did not declare', model: 'sonnet' },
-    { title: 'Verify', detail: 'project check command: baseline, then a fix-up agent after each editing phase', model: 'opus' },
+    { title: 'Verify', detail: 'project check command: baseline on sonnet, then an opus fix-up agent after each editing phase', model: 'opus' },
     { title: 'Classify', detail: 'flag comment removal candidates per file batch', model: 'opus' },
     { title: 'Remove', detail: 'delete confirmed candidates per batch', model: 'opus' },
   ],
@@ -63,26 +63,21 @@ if (!Array.isArray(input.pruneExts) || input.pruneExts.length === 0) {
 }
 if (!input.root) throw new Error('root: absolute project root path is required')
 
-// Grouping by top-level directory keeps each batch coherent enough to judge
-// cross-file structure.
 const BATCH_SIZE = 15
-// The only hard cap; convergence normally ends the loop first.
 const MAX_ROUNDS = 100
 
-// Finder and apply agents default to opus at high effort: judgment work needs
-// opus. A model override must bring its own effort; the pairing is the
-// user's call. Judge and verify/fix agents are pinned to opus/high regardless
-// of the override (gatekeeping and failure attribution are judgment work);
-// hash agents stay on sonnet, purely mechanical work.
-const simplifyOpts = input.model
-  ? { model: input.model, effort: input.effort }
-  : { model: 'opus', effort: 'high' }
+// The user's [model effort] override drives every phase except the judge and
+// the verify phase, which stay fixed so the gate and the repair are independent
+// of how cheap the run was asked to be.
+const override = input.model ? { model: input.model, effort: input.effort } : null
+const simplifyOpts = override ?? { model: 'opus', effort: 'high' }
+const applyOpts = override ?? { model: 'fable', effort: 'high' }
+const removeOpts = override ?? { model: 'opus', effort: 'medium' }
 const judgeOpts = { model: 'opus', effort: 'high' }
+const checkOpts = { model: 'sonnet', effort: 'low' }
 
 const GROUPS = ['Performance improvements', 'Code simplifications', 'Bug fixes']
 
-// Self-contained on purpose: this workflow must not depend on
-// ~/.claude/skills/simplify/SKILL.md.
 const SIMPLIFY = `You are the FINDER in an automated code-simplification loop. Read the code in scope and return every refinement worth making as a finding. Do not edit any files; separate agents apply the findings. An independent judge rejects any finding that is not a genuine improvement, and only approved findings are applied.
 
 Propose refinements that:
@@ -133,10 +128,6 @@ const FINDINGS_SCHEMA = {
   required: ['findings'],
 }
 
-// Built per call rather than as a constant so the index can be bounded by the
-// batch's own proposal count: a judge that answers 1-based satisfies any
-// unbounded schema, and every verdict would then land on a neighbouring
-// finding, applying a change no judge approved.
 function judgeSchema(count) {
   return {
     type: 'object',
@@ -201,21 +192,23 @@ const UNTRACKED_SCHEMA = {
   required: ['untracked'],
 }
 
+const FAILURE_LIST_SCHEMA = {
+  type: 'array',
+  items: {
+    type: 'object',
+    properties: {
+      file: { type: 'string' },
+      message: { type: 'string' },
+    },
+    required: ['file', 'message'],
+  },
+}
+
 const CHECK_SCHEMA = {
   type: 'object',
   properties: {
     passed: { type: 'boolean' },
-    failures: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          file: { type: 'string' },
-          message: { type: 'string' },
-        },
-        required: ['file', 'message'],
-      },
-    },
+    failures: FAILURE_LIST_SCHEMA,
   },
   required: ['passed', 'failures'],
 }
@@ -225,17 +218,7 @@ const FIX_SCHEMA = {
   properties: {
     passed: { type: 'boolean' },
     fixed: { type: 'array', items: { type: 'string' } },
-    remaining: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          file: { type: 'string' },
-          message: { type: 'string' },
-        },
-        required: ['file', 'message'],
-      },
-    },
+    remaining: FAILURE_LIST_SCHEMA,
   },
   required: ['passed', 'fixed', 'remaining'],
 }
@@ -327,9 +310,6 @@ async function runHash(cmd, label) {
     }
     if (result?.hash) return result.hash
   }
-  // Null rather than a throw: every caller sits at the top level of the script,
-  // where a throw would discard the whole report of a run whose agents have
-  // already rewritten files.
   return null
 }
 
@@ -379,7 +359,7 @@ async function runCheck(label) {
 ${input.checkCmd}
 
 Report whether it passed. For every failure it reports (type error, test failure, lint error), return the implicated file path and a concise one-line message. The path must be relative to the project root, with no leading './' and never absolute. Do not edit any project files and do not attempt any fixes.`,
-      { label, phase: 'Verify', schema: CHECK_SCHEMA, ...judgeOpts },
+      { label, phase: 'Verify', schema: CHECK_SCHEMA, ...checkOpts },
     )
     return result
   } catch {
@@ -407,7 +387,6 @@ const possiblyEditedFiles = new Set()
 let proposedTotal = 0
 let approvedTotal = 0
 
-// Failures that predate the run are never attributed to it.
 let baselineFailures = []
 // A check that fails while naming no file, like a compiler rejecting its own
 // options or a suite aborting in global setup, is honestly reported as a failing
@@ -453,12 +432,8 @@ async function runFix(label, touched, cause, carried = []) {
   if (baselineFailures.length) {
     baselineNote = `\n\nThese failures existed BEFORE the run and are NOT yours to fix. Leave them alone and do not list them in \`remaining\`:\n${baselineFailures.map(f => `- ${f.file}: ${f.message}`).join('\n')}\n\nThe command will therefore still exit non-zero at the end. Report passed=true when the ONLY failures left are the pre-existing ones listed above; report passed=false only if a failure this run caused is still present, and list it in \`remaining\`. \`passed\` means "no run-caused failures remain", not "the command exits 0".`
   } else if (baselineFailing) {
-    // Without this the agent is told nothing about the pre-existing failure and
-    // spends its three rounds of edits chasing a failure that predates the run.
     baselineNote = `\n\nThis command ALREADY exited non-zero BEFORE the run, and the baseline could not tie that failure to any file. It is NOT yours to fix and the command will still exit non-zero at the end. Report passed=true unless you can tie a specific failure to the edits this run made; do not list a failure you cannot tie to them in \`remaining\`. \`passed\` means "no run-caused failures remain", not "the command exits 0".`
   }
-  // The last fix-up of the run re-runs the check on the final tree, so it is the
-  // one agent placed to adjudicate what an earlier fix-up left broken.
   const carriedNote = carried.length
     ? `\n\nAn earlier phase of this same run left these failures unrepaired. They are NOT pre-existing. Fix them too, and re-list any that survive in \`remaining\`:\n${carried.map(f => `- ${f.file}: ${f.message}`).join('\n')}`
     : ''
@@ -628,9 +603,6 @@ while (true) {
   let targets = batches.filter(b => b.active)
   let isSweep = false
   if (targets.length === 0) {
-    // Confirmation sweep: every batch, including every retired one, gets a
-    // fresh finder before convergence is declared, catching cross-batch
-    // fallout and prematurely retired work without dependency tracking.
     // Abandoned batches stay out: their agents would die again and the resulting
     // `roundHadDead` would block the sweep from ever confirming convergence.
     targets = batches.filter(b => !b.abandoned)
@@ -683,11 +655,16 @@ while (true) {
     (prev, batch) => {
       if (!prev || prev.status !== 'judged') return prev
       if (!prev.verdicts) return { status: 'judge-dead', proposed: prev.findings.length }
-      const verdictFor = i => prev.verdicts.verdicts.find(v => v.index === i)
-      const approved = prev.findings.filter((f, i) => verdictFor(i)?.approved)
-      const rejected = prev.findings
-        .map((f, i) => ({ ...f, reason: verdictFor(i)?.reason ?? 'no verdict returned' }))
-        .filter((f, i) => !verdictFor(i)?.approved)
+      const approved = []
+      const rejected = []
+      prev.findings.forEach((finding, i) => {
+        const verdict = prev.verdicts.verdicts.find(v => v.index === i)
+        if (verdict?.approved) {
+          approved.push(finding)
+        } else {
+          rejected.push({ ...finding, reason: verdict?.reason ?? 'no verdict returned' })
+        }
+      })
       if (approved.length === 0) return { status: 'all-rejected', proposed: prev.findings.length, rejected }
       // Recorded at dispatch, not from the report: an applier that edits and
       // then dies, or whose stage throws on an exhausted budget, returns
@@ -701,7 +678,7 @@ while (true) {
         label: `apply:${batch.name}@${iterations}`,
         phase: 'Apply',
         schema: APPLY_SCHEMA,
-        ...simplifyOpts,
+        ...applyOpts,
       }).then(r => ({ status: 'applied', proposed: prev.findings.length, approved: approved.length, rejected, report: r }))
     },
   )
@@ -744,7 +721,6 @@ while (true) {
       if (r?.rejected) allRejected.push(...r.rejected)
       continue
     }
-    // Powers the "this is visit N" prompt context only, not a budget.
     if (!isSweep) batch.visits++
     // Only back-to-back failures mean a batch is hopeless; without this reset,
     // two unrelated agent deaths rounds apart would abandon a batch that has
@@ -766,9 +742,6 @@ while (true) {
     const report = r.report
     const applied = report.applied ?? []
     roundApplied += applied.length
-    // A batch that actually changed stays active so a fresh finder re-examines
-    // the new state; a batch whose applier applied nothing (every approved
-    // finding failed) has an unchanged tree and retires; the sweep re-looks.
     batch.active = applied.length > 0
     if ((report.failed ?? []).length) {
       log(`batch ${batch.name}: ${report.failed.length} approved finding(s) could not be applied`)
@@ -801,9 +774,6 @@ while (true) {
   for (const f of newFiles) assignNewFile(f)
   filesCreatedDuringRun.push(...newFiles)
 
-  // The tree hash is the ground truth behind the appliers' self-reports: the
-  // loop may only converge on a sweep that applied nothing AND landed on an
-  // already-seen tree state, so unreported edits can never end the loop early.
   const treeHash = await runHash(input.hashCmd, `hash:tree@${iterations}`)
   if (!treeHash) {
     stopReason = 'hash-unavailable'
@@ -830,25 +800,18 @@ while (true) {
 // a run that ended with no hash at all has to fall back on an applier having
 // been dispatched. It runs before the fix-up so undeclared files reach both the
 // fix-up and the prune phase.
+const treeMoved = globalSeen.size > 1 || (treeEdited && stopReason === 'hash-unavailable')
 let undeclaredFiles = []
-if (globalSeen.size > 1 || (treeEdited && stopReason === 'hash-unavailable')) {
+if (treeMoved) {
   undeclaredFiles = await discoverUntracked()
   if (undeclaredFiles.length) {
     for (const f of undeclaredFiles) known.add(f)
     filesCreatedDuringRun.push(...undeclaredFiles)
-    // They arrive too late for the loop to simplify them, as reopening it here
-    // would restart convergence, but the later phases still reach them: the
-    // fix-up verifies them whenever it runs, and the prune phase classifies them
-    // when it runs and their extension is one it was given.
     log(`${undeclaredFiles.length} file(s) appeared during the run without being declared: ${touchedBlock(undeclaredFiles)}`)
   }
 }
 
-// Loop agents never run project-wide commands, so this quiet point is where
-// the project gets verified and repaired, regardless of how the loop ended.
-// Gated as discovery is: an unmoved tree has nothing to verify, and a dispatched
-// applier only speaks for a run whose hash never came back.
-if (input.checkCmd && !checkDisabled && (globalSeen.size > 1 || (treeEdited && stopReason === 'hash-unavailable'))) {
+if (input.checkCmd && !checkDisabled && treeMoved) {
   // Same `known` gate as the loop on the dispatched targets: an out-of-scope
   // path there is a proposal this run never owned. A path in `allChanges` is a
   // report of a real edit; in scope or not, it is where breakage may be.
@@ -899,8 +862,8 @@ if (stopReason === 'converged') {
     const i = base.lastIndexOf('.')
     return i > 0 ? base.slice(i) : ''
   }
-  const trackedPruneFiles = input.pruneFiles ?? []
-  const untrackedPruneFiles = input.pruneUntrackedFiles ?? []
+  const trackedPruneFiles = input.pruneFiles
+  const untrackedPruneFiles = input.pruneUntrackedFiles
   const alreadyListed = new Set([...trackedPruneFiles, ...untrackedPruneFiles])
   const pruneExts = new Set(input.pruneExts.map(e => (e.startsWith('.') ? e : `.${e}`)))
   const createdPruneFiles = filesCreatedDuringRun.filter(f => pruneExts.has(extOf(f)) && !alreadyListed.has(f))
@@ -970,7 +933,7 @@ Do NOT edit anything. Return the candidates with exact file, approximate line nu
 
 Candidates (JSON):
 ${JSON.stringify(res.candidates, null, 2)}`,
-          { label: `remove:${iteration}.batch${batch.id}`, phase: 'Remove', schema: PRUNE_RESULT_SCHEMA, ...simplifyOpts },
+          { label: `remove:${iteration}.batch${batch.id}`, phase: 'Remove', schema: PRUNE_RESULT_SCHEMA, ...removeOpts },
         ).then((r) => ({ batch, removed: r?.removed || 0, skipped: r?.skipped || [], clean: false, deadRemove: !r }))
       },
     )
@@ -1018,6 +981,7 @@ ${JSON.stringify(res.candidates, null, 2)}`,
     // deaths mean a batch is unreachable, so a classifier that answered clears
     // the tally; without the reset, two flakes passes apart would drop a batch
     // that has been classified and pruned in between.
+    const abandonedIds = new Set()
     for (const r of ok) {
       if (!r.dead) {
         r.batch.deadAttempts = 0
@@ -1025,11 +989,11 @@ ${JSON.stringify(res.candidates, null, 2)}`,
       }
       r.batch.deadAttempts = (r.batch.deadAttempts ?? 0) + 1
       if (r.batch.deadAttempts >= 2) {
+        abandonedIds.add(r.batch.id)
         unauditedFiles.push(...r.batch.files)
         log(`prune: batch ${r.batch.id} abandoned after ${r.batch.deadAttempts} consecutive classify agents died; it never produced a clean pass, so its comments may not be fully audited`)
       }
     }
-    const abandonedIds = new Set(ok.filter((r) => r.dead && r.batch.deadAttempts >= 2).map((r) => r.batch.id))
 
     // Re-classifying a settled batch every pass invites agents to justify the
     // visit by flagging borderline comments, so the tree keeps changing and
