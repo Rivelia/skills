@@ -1,6 +1,7 @@
 ---
 name: glab-upload
 description: Upload screenshots/images to a GitLab project and embed them in MR descriptions or notes via the uploads API. Use when embedding a screenshot or image in an MR description or note, or when `glab api ... uploads` returns "file is invalid".
+argument-hint: "<image-path> [<image-path> ...]"
 ---
 
 # glab uploads

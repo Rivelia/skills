@@ -1,6 +1,7 @@
 ---
 name: glab-diffnote
 description: Post GitLab MR discussion threads anchored to diff lines (DiffNotes) via glab api. Use when commenting on specific lines of an MR diff, or when a posted note came back as DiscussionNote instead of DiffNote.
+argument-hint: "[<mr-iid>] [<file>:<line> ...]"
 ---
 
 # glab DiffNotes
