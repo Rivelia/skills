@@ -2,7 +2,7 @@ export const meta = {
   name: 'merge-ready',
   description: 'Repeat the adversarial code review over a scope, re-scouting the finders each round, until a round fixes nothing severe in production code and fewer issues than it had finders; then simplify the same scope',
   phases: [
-    { title: 'Scout', detail: 'Sonnet records the tree state, then Fable designs the finder dimensions afresh for the round' },
+    { title: 'Scout', detail: 'Sonnet records the tree state, then Fable (or args.model) designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
     { title: 'Triage', detail: 'Opus decides whether each fixed critical/high finding changed production behaviour', model: 'opus' },
     { title: 'Prepare', detail: 'Sonnet computes the simplify inputs: file list, prune candidates, untracked baseline, tree hash', model: 'sonnet' },
@@ -38,7 +38,7 @@ if (typeof input.context !== 'string' || !input.context.trim()) {
 if (!Array.isArray(input.pruneExts) || input.pruneExts.length === 0) {
   throw new Error('args.pruneExts: non-empty string[] of comment-carrying source extensions is required, e.g. [".ts", ".js", ".svelte"]')
 }
-for (const key of ['checks', 'checkCmd', 'excludePattern', 'implementerModel']) {
+for (const key of ['checks', 'checkCmd', 'excludePattern', 'model']) {
   if (input[key] !== undefined && (typeof input[key] !== 'string' || !input[key].trim())) {
     throw new Error(`args.${key}: a non-empty string when given; omit it otherwise`)
   }
@@ -53,11 +53,13 @@ const SCOPE = input.scope
 const CHECKS = input.checks ? input.checks.trim() : null
 const CHECK_CMD = input.checkCmd ? input.checkCmd.trim() : null
 const EXCLUDE = input.excludePattern ? input.excludePattern.trim() : DEFAULT_EXCLUDE
-const IMPLEMENTER_MODEL = input.implementerModel ? input.implementerModel.trim() : undefined
+// The model argument replaces Fable wherever it is the default: the scout here,
+// the review implementers, the simplify appliers. Every other agent keeps its model.
+const MODEL = input.model ? input.model.trim() : undefined
 const PRUNE_EXTS = input.pruneExts.map((e) => (e.startsWith('.') ? e : `.${e}`))
 
 const STATE_OPTS = { model: 'sonnet', effort: 'low' }
-const SCOUT_OPTS = { model: 'fable', effort: 'high' }
+const SCOUT_OPTS = { model: MODEL || 'fable', effort: 'high' }
 const TRIAGE_OPTS = { model: 'opus', effort: 'medium' }
 const PREPARE_OPTS = { model: 'sonnet', effort: 'low' }
 // ---------- shared prompt fragments ----------
@@ -299,7 +301,7 @@ const allPossiblyDirty = new Set()
 let stopReason = null
 let stopDetail = null
 
-log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_ROUNDS} review round(s), implementers on ${IMPLEMENTER_MODEL || 'fable'}, simplify afterwards`)
+log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_ROUNDS} review round(s), Fable agents on ${MODEL || 'fable'}, simplify afterwards`)
 
 for (let round = 1; round <= MAX_ROUNDS; round++) {
   phase('Scout')
@@ -336,7 +338,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   }
   if (BASE) reviewArgs.base = BASE
   if (CHECKS) reviewArgs.checks = CHECKS
-  if (IMPLEMENTER_MODEL) reviewArgs.implementerModel = IMPLEMENTER_MODEL
+  if (MODEL) reviewArgs.implementerModel = MODEL
   const { result: review, error } = await runChild(input.reviewScript, reviewArgs, 'review workflow')
 
   const entry = {
@@ -458,6 +460,7 @@ if (stopReason !== 'converged') {
     }
     if (BASE) simplifyArgs.base = BASE
     if (CHECK_CMD) simplifyArgs.checkCmd = CHECK_CMD
+    if (MODEL) simplifyArgs.applyModel = MODEL
     const { result, error } = await runChild(input.simplifyScript, simplifyArgs, 'simplify workflow')
     simplify = result
       ? { ran: true, skipped: null, error: null, result }
@@ -471,7 +474,7 @@ log(`done: ${rounds.length} review round(s), stop reason ${stopReason}, ${allFix
 return {
   scope: SCOPE,
   base: BASE,
-  implementerModel: IMPLEMENTER_MODEL || 'fable',
+  model: MODEL || 'fable',
   checksConfigured: CHECKS !== null,
   checkCmdConfigured: CHECK_CMD !== null,
   maxRounds: MAX_ROUNDS,

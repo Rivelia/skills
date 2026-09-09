@@ -94,7 +94,7 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
    })
    ```
 
-   Pass `files`, `untrackedBaseline`, `pruneFiles`, `pruneUntrackedFiles`, and `pruneExts` as real JSON arrays, not JSON-encoded strings. Every array is required: pass `[]` when the working tree has no untracked files or a prune list has no candidates.
+   Pass `files`, `untrackedBaseline`, `pruneFiles`, `pruneUntrackedFiles`, and `pruneExts` as real JSON arrays, not JSON-encoded strings. Every array is required: pass `[]` when the working tree has no untracked files or a prune list has no candidates. The script also accepts an optional `applyModel`, a model that replaces Fable for the appliers only; the merge-ready workflow passes it, this skill never does.
 
    The workflow returns `{scope, iterations, sweeps, stopReason, distinctTreeStates, findingsProposed, findingsApproved, rejectedFindings, changesApplied, undeclaredFiles, unanalyzedFiles, abandonedAfterProgress, discoveryFailed, unresolvedCheckFailures, verificationStatus, checkBaselineFailing, prune, summary}`. Step 8 defines how to read and report every field; semantics beyond what it states live in [simplify.mjs](simplify.mjs).
 

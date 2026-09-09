@@ -82,7 +82,7 @@ function scopeText() {
 const CONTEXT = `Repository: ${ROOT}.
 ${input.context.trim()}
 ${scopeText()}
-Severity scale: critical = data loss or corruption, a security breach, or a crash of the production process; high = wrong behaviour on a path users hit in normal use, a deadlock, hang or resource leak under normal load, or a security or tenancy gap; medium = wrong behaviour on an edge path, a real leak or race that is hard to hit, a convention violation the project's agent docs state explicitly, or a false statement in docs or comments a maintainer would act on; low = a demonstrably false statement shipped to users (UI copy, translations, docs, error messages), a misleading comment, or a small robustness issue with no user-visible effect today.`
+Severity scale: critical = data loss or corruption, a security breach, or a crash of the production process; high = wrong behaviour on a path users hit in normal use, a deadlock, hang or resource leak under normal load, or a security or tenancy gap; medium = wrong behaviour on an edge path, a real leak or race that is hard to hit, a convention violation the project's agent docs state explicitly, or a false statement in docs or comments a maintainer would act on; low = a demonstrably false statement shipped to users (UI copy, translations, docs, error messages), a misleading comment, dead code (an unreachable branch, an unused export, an obsolete option) or stale terminology (a term the project's domain or agent docs mark as avoided, deprecated or replaced, on any surface: prompts, identifiers, comments, copy, docs), or a small robustness issue with no user-visible effect today.`
 
 const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit, create or delete files under ${ROOT}, and run no git command that changes state (no checkout, restore, stash, commit, reset, clean). Scratch files go in /tmp. You may run existing tests and small scripts from /tmp.`
 
@@ -239,7 +239,7 @@ ${DIMENSION_LIST}
 Method: ${input.scope === 'codebase' ? 'read every file you own in full' : 'read every hunk of every file you own (untracked files whole)'}, then the surrounding current code and whatever callers or callees you need to be sure. Where a claim can be tested cheaply (a regex, a library contract, a runtime behaviour), test it with a small script in /tmp, by reading the library sources in node_modules or the equivalent, or by running an existing test. Each finding goes to two adversarial skeptics that refute by default when uncertain, so a finding you have not verified is wasted: prefer fewer, verified findings over many speculative ones.
 
 Rules:
-- Report real defects: wrong behaviour, security or tenancy gaps, races, leaks, data loss, regressions, contradictions between code and docs or copy, and violations of rules you can quote from the project's agent docs.
+- Report real defects: wrong behaviour, security or tenancy gaps, races, leaks, data loss, regressions, contradictions between code and docs or copy, dead code, stale terminology (a term the project's domain or agent docs mark as avoided, deprecated or replaced, wherever it appears), and violations of rules you can quote from the project's agent docs.
 - Report each defect once, at its root location (the line whose change fixes it), even when several files you read expose it.
 - ${preExisting}
 - A demonstrably false statement in user-facing copy, docs or error messages is a finding regardless of audience size. A false statement in a code comment counts only when a maintainer acting on it would introduce a bug or miss one.
@@ -281,7 +281,9 @@ Your verdict is three-way:
 - downgrade: the mechanism is real but the impact is overstated. Severity inflation alone is NEVER a kill ground: downgrade and confirm. Say the severity you settle on.
 - confirm: the finding is material at the finder's severity.
 
-Carve-out: a demonstrably false statement shipped to users (UI copy, translations, user-facing docs, error messages) is material by definition, however small its audience. You may downgrade it (e.g. to low) but must not refute it; "nothing consumes it" or "no decision depends on it" are not valid kill grounds for factual incorrectness.
+Carve-outs, where you may downgrade (e.g. to low) but must not refute:
+- A demonstrably false statement shipped to users (UI copy, translations, user-facing docs, error messages) is material by definition, however small its audience. "Nothing consumes it" and "no decision depends on it" are not valid kill grounds for factual incorrectness.
+- Dead code (an unreachable branch, an unused export, an obsolete option) and stale terminology (a term the project's domain or agent docs mark as avoided, deprecated or replaced) are material by definition: stale code misleads the next reader and spreads. A vocabulary rule applies to every surface in the repository (prompts, identifiers, comments, copy, docs, tests) unless the doc exempts that surface by name; do not narrow its scope by inference. "No user can see the mismatch", "the surrounding text already pins the correct term" and "other shipped code uses the same term" are not valid kill grounds; the last one widens the finding rather than refuting it.
 
 Do not judge technical truth here (a later skeptic does); assume the mechanism is as described and ask whether it matters. Read the code and the docs you need to decide. Quote the code or doc your verdict rests on.`
 }

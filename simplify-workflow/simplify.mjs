@@ -62,6 +62,12 @@ if (!Array.isArray(input.pruneExts) || input.pruneExts.length === 0) {
   throw new Error('pruneExts: string[] is required, the extensions the candidate lists were filtered on, e.g. [".ts", ".js", ".svelte"]')
 }
 if (!input.root) throw new Error('root: absolute project root path is required')
+// A narrower override than [model effort]: it replaces Fable for the appliers
+// only and leaves every other agent's model alone. The full override wins when
+// both are given.
+if (input.applyModel !== undefined && (typeof input.applyModel !== 'string' || !input.applyModel.trim())) {
+  throw new Error('applyModel: a model name (e.g. opus, sonnet, haiku) when given; omit it to keep the Fable appliers')
+}
 
 const BATCH_SIZE = 15
 const MAX_ROUNDS = 100
@@ -71,7 +77,7 @@ const MAX_ROUNDS = 100
 // of how cheap the run was asked to be.
 const override = input.model ? { model: input.model, effort: input.effort } : null
 const simplifyOpts = override ?? { model: 'opus', effort: 'high' }
-const applyOpts = override ?? { model: 'fable', effort: 'high' }
+const applyOpts = override ?? { model: input.applyModel ? input.applyModel.trim() : 'fable', effort: 'high' }
 const removeOpts = override ?? { model: 'opus', effort: 'medium' }
 const judgeOpts = { model: 'opus', effort: 'high' }
 const checkOpts = { model: 'sonnet', effort: 'low' }
