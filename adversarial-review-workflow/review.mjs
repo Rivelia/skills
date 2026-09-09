@@ -1,12 +1,12 @@
 export const meta = {
-  name: 'adversarial-code-review',
+  name: 'adversarial-review',
   description: 'Adversarial code review over a scope: finders per dimension, dedup at intake, two skeptics per finding, root-cause clustering, budgeted implementers that commit their own fix',
   phases: [
     { title: 'Find', detail: 'one Opus finder per dimension', model: 'opus' },
     { title: 'Dedup', detail: 'Sonnet intake check against the registered findings', model: 'sonnet' },
     { title: 'Verify', detail: 'materiality skeptic, then technical skeptic', model: 'opus' },
     { title: 'Cluster', detail: 'group confirmed findings by root cause', model: 'opus' },
-    { title: 'Implement', detail: 'one Fable implementer per cluster, strictly sequential, commits its own fix', model: 'fable' },
+    { title: 'Implement', detail: 'one implementer per cluster (Fable unless args.implementerModel overrides), strictly sequential, commits its own fix' },
     { title: 'Cover', detail: 'Opus check whether a cluster fix also closes its siblings', model: 'opus' },
     { title: 'Cleanup', detail: 'Sonnet tree restore after a dead implementer', model: 'sonnet' },
   ],
@@ -38,11 +38,16 @@ for (const d of input.dimensions) {
 if (typeof input.context !== 'string' || !input.context.trim()) {
   throw new Error('args.context: a string describing the project (stack, agent docs to quote, commit convention) is required')
 }
+if (input.implementerModel !== undefined && (typeof input.implementerModel !== 'string' || !input.implementerModel.trim())) {
+  throw new Error('args.implementerModel: a model name (e.g. opus, sonnet, haiku) when given; omit it to keep the Fable implementers')
+}
 
 const ROOT = input.root
 const BASE = input.base || null
 const DIMENSIONS = input.dimensions
 const CHECKS = typeof input.checks === 'string' && input.checks.trim() ? input.checks.trim() : null
+// The implementers run on Fable unless the user picked another model; effort stays tied to severity.
+const IMPLEMENTER_MODEL = input.implementerModel ? input.implementerModel.trim() : 'fable'
 
 const FINDER_OPTS = { model: 'opus', effort: 'high' }
 const DEDUP_OPTS = { model: 'sonnet', effort: 'low' }
@@ -51,7 +56,7 @@ const TECHNICAL_OPTS = { model: 'opus', effort: 'high' }
 const CLUSTER_OPTS = { model: 'opus', effort: 'medium' }
 const SIBLING_OPTS = { model: 'opus', effort: 'high' }
 const CLEANUP_OPTS = { model: 'sonnet', effort: 'low' }
-const implementerOpts = (severity) => ({ model: 'fable', effort: severity === 'low' ? 'medium' : 'high' })
+const implementerOpts = (severity) => ({ model: IMPLEMENTER_MODEL, effort: severity === 'low' ? 'medium' : 'high' })
 
 // ---------- shared prompt fragments ----------
 
@@ -528,7 +533,7 @@ function registerAndVerify(f, dim) {
 // ---------- Find + Dedup + Verify, no barriers between them ----------
 
 phase('Find')
-log(`scope ${input.scope}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, ${DIMENSIONS.length} finder dimension(s), ${input.dirtyAtLaunch.length ? `${input.dirtyAtLaunch.length} path(s) dirty at launch` : 'tree clean at launch'}`)
+log(`scope ${input.scope}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, ${DIMENSIONS.length} finder dimension(s), ${input.dirtyAtLaunch.length ? `${input.dirtyAtLaunch.length} path(s) dirty at launch` : 'tree clean at launch'}, implementers on ${IMPLEMENTER_MODEL}`)
 
 await parallel(DIMENSIONS.map((d) => async () => {
   const res = await run(finderPrompt(d), { label: `find: ${d.key}`, phase: 'Find', schema: FINDINGS_SCHEMA, ...FINDER_OPTS })
@@ -658,6 +663,7 @@ log(`done: ${registry.filter((e) => e.outcome === 'fixed').length} fixed, ${regi
 
 return {
   scope: input.scope,
+  implementerModel: IMPLEMENTER_MODEL,
   base: BASE,
   checksConfigured: CHECKS !== null,
   finderFailures,

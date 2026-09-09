@@ -1,7 +1,7 @@
 ---
-name: auto-adversarial-code-review-workflow
+name: adversarial-review-workflow
 description: Launches an adversarial code review workflow over a scope (uncommitted | branch | unpushed | codebase), auto-fixing findings when the smallest fix fits the finding's severity.
-argument-hint: "<uncommitted|branch|unpushed|codebase>"
+argument-hint: "<uncommitted|branch|unpushed|codebase> [model]"
 disable-model-invocation: true
 ---
 
@@ -9,7 +9,7 @@ A Workflow reviews the scoped code: one finder per review dimension proposes def
 
 ## Steps
 
-1. **Resolve the scope.** The first argument must be exactly one of `uncommitted`, `branch`, `unpushed`, `codebase`; if it is missing or anything else, ask the user which scope to use and stop without launching anything. Any further argument: ask the user what it means and stop.
+1. **Resolve the arguments.** The first must be exactly one of `uncommitted`, `branch`, `unpushed`, `codebase`; if it is missing or anything else, ask the user which scope to use and stop without launching anything. An optional second argument is the model that replaces Fable for the implementers, the only agents that run on it: a plausible model name such as `opus`, `sonnet` or `haiku`. If the token after the scope is not a model name, ask the user what they meant and stop. The effort is not an argument: it stays tied to the finding's severity. Any further argument: ask the user what it means and stop.
 
    Resolve `base`, the commit bounding the diff:
    - `uncommitted`: `git rev-parse HEAD`.
@@ -35,7 +35,7 @@ A Workflow reviews the scoped code: one finder per review dimension proposes def
    ```
    Workflow({
      scriptPath: "<absolute path to review.mjs>",
-     args: { scope: "<scope>", root: "<absolute project root>", base: "<commit, omitted for codebase>", dirtyAtLaunch: [<paths>], untracked: [<paths>], dimensions: [{ key, title, focus, files: [<paths>] }, ...], context: "<project description>", checks: "<check commands, omitted when none found>" }
+     args: { scope: "<scope>", root: "<absolute project root>", base: "<commit, omitted for codebase>", dirtyAtLaunch: [<paths>], untracked: [<paths>], dimensions: [{ key, title, focus, files: [<paths>] }, ...], context: "<project description>", checks: "<check commands, omitted when none found>", implementerModel: "<model argument, omitted when not given>" }
    })
    ```
 
@@ -46,11 +46,11 @@ A Workflow reviews the scoped code: one finder per review dimension proposes def
    - Dedup (Sonnet, low): each candidate is compared with every finding registered at that moment; a duplicate attaches to the earlier finding as "also reported by" and inherits its verdicts and outcome. Dedup is serialized; verification is not.
    - Verify (Opus): the materiality skeptic (medium effort) runs first and can refute, downgrade or confirm; a refutation ends verification. The technical skeptic (high effort) can refute, confirm as-is, or confirm with a corrected description; a correction that changes the consequence sends the finding through materiality once more. Each skeptic refutes by default when uncertain.
    - Cluster (Opus, medium): once every finder and every verification has completed, confirmed findings are grouped by root cause with a lead per cluster. Skipped for a single confirmed finding.
-   - Implement (Fable, medium effort for low severity and high otherwise): one implementer per cluster, strictly one at a time, in descending severity. It plans the smallest fix, checks it against the severity budget and the excluded kinds, applies it, runs `checks`, and commits it when none of its files is in `dirtyAtLaunch` or holds an earlier uncommitted fix; otherwise it leaves the fix uncommitted. A check it cannot make pass within the budget makes it undo its own hunks and report the fix as reverted. Nobody reviews the implementer's change afterwards; the implementer is told it is the last line.
+   - Implement (Fable, or the model argument; medium effort for low severity and high otherwise): one implementer per cluster, strictly one at a time, in descending severity. It plans the smallest fix, checks it against the severity budget and the excluded kinds, applies it, runs `checks`, and commits it when none of its files is in `dirtyAtLaunch` or holds an earlier uncommitted fix; otherwise it leaves the fix uncommitted. A check it cannot make pass within the budget makes it undo its own hunks and report the fix as reverted. Nobody reviews the implementer's change afterwards; the implementer is told it is the last line.
    - Cover (Opus, high): each sibling of a fixed lead is checked against the lead's hunks and recorded as covered, or sent to its own implementer.
    - Cleanup (Sonnet, low): only after an implementer dies; restores unprotected paths and lists protected ones that still hold changes.
 
-   The workflow returns `{scope, base, checksConfigured, finderFailures, clusters, fixes, uncommittedFixFiles, possiblyDirty, findings}`. Each finding carries `status` (`confirmed`, `refuted`, `agent_failed`), `outcome` (`fixed`, `covered`, `not_fixed`, `reverted`, `agent_failed`, or null when never implemented), `claimedSeverity` and settled `severity`, the final `description` with `corrected` set when the technical skeptic rewrote it, `alsoReportedBy`, and the implementer's `plan`, `reason`, `excludedKind`, `notes`, `files`, `kinds`, `checks`, `committed` and `commitSha`.
+   The workflow returns `{scope, implementerModel, base, checksConfigured, finderFailures, clusters, fixes, uncommittedFixFiles, possiblyDirty, findings}`. Each finding carries `status` (`confirmed`, `refuted`, `agent_failed`), `outcome` (`fixed`, `covered`, `not_fixed`, `reverted`, `agent_failed`, or null when never implemented), `claimedSeverity` and settled `severity`, the final `description` with `corrected` set when the technical skeptic rewrote it, `alsoReportedBy`, and the implementer's `plan`, `reason`, `excludedKind`, `notes`, `files`, `kinds`, `checks`, `committed` and `commitSha`.
 
 6. **Report** every finding in six categories, ordered by severity within each:
    - fixed: whether committed (with the sha) or left uncommitted in the working tree, naming the files, plus the implementer's notes on what a fuller fix would need;
@@ -60,7 +60,7 @@ A Workflow reviews the scoped code: one finder per review dimension proposes def
    - never attempted because an agent failed, naming the agent (`failedAt`);
    - refuted, with the skeptic (`refutedBy`) and its reason.
 
-   Number the findings continuously across the whole report so each can be quoted by its number. A finding attached at intake appears under its primary as "also reported by" with the finder that reported it, without a number of its own. Then:
+   Number the findings continuously across the whole report so each can be quoted by its number. When `implementerModel` is not `fable`, say which model applied the fixes. A finding attached at intake appears under its primary as "also reported by" with the finder that reported it, without a number of its own. Then:
    - `finderFailures` non-empty: state prominently that those dimensions were never reviewed, naming them, and make no claim that the scope was covered.
    - `checksConfigured` false: state that no check command was found, so every fix was verified only by reading, and the user should run the project's checks before relying on the tree.
    - `uncommittedFixFiles` non-empty: list them and say those fixes sit in the working tree next to the user's uncommitted work.
