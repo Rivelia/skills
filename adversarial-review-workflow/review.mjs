@@ -693,6 +693,7 @@ return {
     commitSha: e.commitSha ?? null,
     files: e.implementation ? e.implementation.files : null,
     kinds: e.implementation ? e.implementation.kinds : null,
+    hunks: e.implementation ? e.implementation.hunks : null,
     checks: e.implementation ? e.implementation.checks : null,
     plan: e.implementation ? e.implementation.plan : null,
     reason: e.implementation ? e.implementation.reason : null,
