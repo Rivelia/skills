@@ -27,6 +27,23 @@ Pick skills, with prompts:
 bunx skills@latest add Rivelia/skills --skill glab-diffnote glab-upload
 ```
 
+### Let the workflows read their scripts
+
+The three workflow skills run a script that sits in the skill folder (`merge-ready.mjs`, `review.mjs`, `simplify.mjs`). Claude Code only reads a workflow script from the working directory or from a script it wrote itself, so a global install needs the skill directories allowed in `~/.claude/settings.json`. The CLI installs into `~/.agents/skills` and symlinks that into `~/.claude/skills`, and the skills resolve their script paths through the symlink, so both are needed:
+
+```json
+{
+  "permissions": {
+    "additionalDirectories": [
+      "~/.claude/skills",
+      "~/.agents/skills"
+    ]
+  }
+}
+```
+
+A project-level install lands in the working directory and needs nothing.
+
 ## Update
 
 Remove the installed skills, then add them again. `skills update` keeps whatever name a skill was installed under, so it misses renamed skills; a remove and add does not. The list includes retired names so an older install is cleaned too.
