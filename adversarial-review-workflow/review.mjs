@@ -95,7 +95,7 @@ const BUDGET = {
   critical: 'CRITICAL budget: a contained change of roughly under 60 lines across a few files whose behaviour is easy to reason about and to test.',
 }
 
-const EXCLUDED = `Never auto-applied, whatever the severity: new CI jobs, scripts, config or infrastructure; new abstractions (a wrapper, a predicate, a helper, a module) or changes to exports and public signatures; DB schema or migration changes; dependency changes; edits to files the finding does not name (except files the clustering attached); tests that assert a still-present bug; tests that read source as text; and findings whose only defect is a missing test.`
+const EXCLUDED = `Never auto-applied, whatever the severity: new CI jobs, scripts, config or infrastructure; new abstractions (a wrapper, a predicate, a helper, a module) or changes to exports and public signatures, except removing the export keyword from a symbol the finding shows has no consumer outside its module; DB schema or migration changes; dependency changes; edits to files the finding does not name (except files the clustering attached); tests that assert a still-present bug; tests that read source as text; and findings whose only defect is a missing test.`
 
 function findingText(e) {
   const sev = e.finalSeverity ?? e.severity
