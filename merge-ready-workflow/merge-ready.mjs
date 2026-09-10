@@ -1,8 +1,8 @@
 export const meta = {
   name: 'merge-ready',
-  description: 'Repeat the adversarial code review over a scope, re-scouting the finders each round, until a round fixes nothing severe in production code and fewer issues than it had finders; then simplify the same scope',
+  description: 'Repeat the adversarial code review over a scope, re-scouting the finders each round, until a round fixes nothing severe in production code and fewer medium-or-higher issues than it had finders; then simplify the same scope',
   phases: [
-    { title: 'Scout', detail: 'Sonnet records the tree state, then Fable (or args.model) designs the finder dimensions afresh for the round' },
+    { title: 'Scout', detail: 'Sonnet records the tree state and the branch log, then Fable (or args.model) designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
     { title: 'Triage', detail: 'Opus decides whether each fixed critical/high finding changed production behaviour', model: 'opus' },
     { title: 'Prepare', detail: 'Sonnet computes the simplify inputs: file list, prune candidates, untracked baseline, tree hash', model: 'sonnet' },
@@ -12,6 +12,9 @@ export const meta = {
 
 const SCOPES = ['uncommitted', 'branch', 'unpushed', 'codebase']
 const SEVERE = ['critical', 'high']
+// Fixes that count toward another round: a low fix (copy, a comment, dead
+// code) leaves nothing new for fresh finders to find.
+const COUNTED = ['medium', 'high', 'critical']
 // Backstop only: the loop ends on its own once a round fixes too little to
 // justify another. Each round spends a few dozen agents and the simplify
 // phase spends more, all against the harness's 1000-agent lifetime cap.
@@ -38,7 +41,7 @@ if (typeof input.context !== 'string' || !input.context.trim()) {
 if (!Array.isArray(input.pruneExts) || input.pruneExts.length === 0) {
   throw new Error('args.pruneExts: non-empty string[] of comment-carrying source extensions is required, e.g. [".ts", ".js", ".svelte"]')
 }
-for (const key of ['checks', 'checkCmd', 'excludePattern', 'model']) {
+for (const key of ['checks', 'checkCmd', 'excludePattern', 'model', 'intent']) {
   if (input[key] !== undefined && (typeof input[key] !== 'string' || !input[key].trim())) {
     throw new Error(`args.${key}: a non-empty string when given; omit it otherwise`)
   }
@@ -53,6 +56,9 @@ const SCOPE = input.scope
 const CHECKS = input.checks ? input.checks.trim() : null
 const CHECK_CMD = input.checkCmd ? input.checkCmd.trim() : null
 const EXCLUDE = input.excludePattern ? input.excludePattern.trim() : DEFAULT_EXCLUDE
+// The author's note on what the diff deliberately does, when the user gave one;
+// the branch's commit messages are collected by the state agent every round.
+const INTENT_NOTE = input.intent ? input.intent.trim() : null
 // The model argument replaces Fable wherever it is the default: the scout here,
 // the review implementers, the simplify appliers. Every other agent keeps its model.
 const MODEL = input.model ? input.model.trim() : undefined
@@ -83,6 +89,7 @@ const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit
 
 const GIT = 'git -c core.quotePath=false'
 const LIST_TRACKED_CMD = SCOPE === 'codebase' ? `${GIT} ls-files` : `${GIT} diff --name-only ${BASE}`
+const LOG_CMD = BASE ? `${GIT} log --format='--- %H%n%B' ${BASE}..HEAD` : null
 
 // ---------- schemas ----------
 
@@ -92,8 +99,9 @@ const STATE_SCHEMA = {
     dirtyAtLaunch: { type: 'array', items: { type: 'string' } },
     untracked: { type: 'array', items: { type: 'string' } },
     tracked: { type: 'array', items: { type: 'string' } },
+    log: { type: 'string', description: 'The commit log output verbatim; empty when the command printed nothing.' },
   },
-  required: ['dirtyAtLaunch', 'untracked', 'tracked'],
+  required: ['dirtyAtLaunch', 'untracked', 'tracked', 'log'],
 }
 
 const DIMENSIONS_SCHEMA = {
@@ -154,22 +162,59 @@ function statePrompt() {
 
 1. dirtyAtLaunch: \`${GIT} status --porcelain\`. Return every path it lists as a plain path, without the two status columns and the space after them. For a rename line ("R  old -> new") return both paths.
 2. untracked: \`${GIT} ls-files -o --exclude-standard\`. Return every path.
-3. tracked: \`${LIST_TRACKED_CMD}\`. Return every path.`
+3. tracked: \`${LIST_TRACKED_CMD}\`. Return every path.
+4. log: ${LOG_CMD ? `\`${LOG_CMD}\`. Return the whole output verbatim, every line including the \`--- <sha>\` markers and the commit bodies; an empty string when it prints nothing.` : 'there is no base commit; return an empty string.'}`
+}
+
+// The state agent's log is a sequence of "--- <sha>" markers, each followed by
+// that commit's message.
+function parseLog(log) {
+  const commits = []
+  let current = null
+  for (const line of String(log || '').split('\n')) {
+    const m = /^--- ([0-9a-f]{40})\s*$/.exec(line)
+    if (m) {
+      current = { sha: m[1], lines: [] }
+      commits.push(current)
+      continue
+    }
+    if (current) current.lines.push(line)
+  }
+  return commits.map((c) => ({ sha: c.sha, message: c.lines.join('\n').trim() })).filter((c) => c.message)
+}
+
+// The intent every agent of the round reads: the user's note, then the
+// branch's commit messages verbatim, with the commits earlier rounds of this
+// loop made set apart so a restore the review itself committed never reads as
+// the author's decision.
+function buildIntent(log) {
+  const reviewShas = new Set(allFixes.map((f) => f.sha).filter(Boolean))
+  const commits = parseLog(log)
+  const authored = commits.filter((c) => !reviewShas.has(c.sha))
+  const mine = commits.filter((c) => reviewShas.has(c.sha))
+  const parts = []
+  if (INTENT_NOTE) parts.push(INTENT_NOTE)
+  if (authored.length) parts.push(authored.map((c) => `--- ${c.sha.slice(0, 9)}\n${c.message}`).join('\n'))
+  if (mine.length) parts.push(`Commits ${mine.map((c) => c.sha.slice(0, 9)).join(', ')} were made by an earlier round of this review, not by the author; they carry none of the author's decisions.`)
+  return parts.length ? parts.join('\n\n') : null
 }
 
 // The scout is told nothing about earlier rounds: no round number, no earlier
 // split, no list of what the fixes touched. Each round's cut is designed from
 // the scope alone, the way a cleared conversation would design it.
-function scoutPrompt(state, inScope) {
+function scoutPrompt(state, inScope, intent) {
   const untracked = new Set(state.untracked)
   const list = inScope.map((f) => `- ${f}${untracked.has(f) ? ' (untracked: no diff against the base, read whole)' : ''}`).join('\n')
   const sizes = SCOPE === 'codebase'
     ? 'See sizes with `wc -l` on the paths.'
     : `See sizes with \`git diff --stat ${BASE}\`.`
+  const intentText = intent
+    ? `\nAuthor's intent for this diff, verbatim (commit messages, the author's note, or both):\n<<<\n${intent}\n>>>\nThe intent is the baseline the finders test the diff against: a removal it states is a decision they check for breakage, not a loss to audit. Cut the dimensions around what the diff introduced or changed and what that could break.\n`
+    : ''
   return `${CONTEXT}
 
 ${READ_ONLY}
-
+${intentText}
 You are the SCOUT of an adversarial code review. Design the finder dimensions from the SHAPE of the scope, not its content: which files are in it and how large their change is, which subsystems and layers they belong to, and what you know of the repository (read its agent docs and directory layout as needed; the finders read the hunks themselves).
 
 Files in scope (${inScope.length}):
@@ -317,7 +362,8 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     stopDetail = `round ${round} found nothing in scope`
     break
   }
-  const scout = await run(scoutPrompt(state, inScope), { label: `scout @${round}`, phase: 'Scout', schema: DIMENSIONS_SCHEMA, ...SCOUT_OPTS })
+  const intent = buildIntent(state.log)
+  const scout = await run(scoutPrompt(state, inScope, intent), { label: `scout @${round}`, phase: 'Scout', schema: DIMENSIONS_SCHEMA, ...SCOUT_OPTS })
   if (!scout) {
     stopReason = 'agent-failed'
     stopDetail = `the scout of round ${round} died`
@@ -339,6 +385,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   if (BASE) reviewArgs.base = BASE
   if (CHECKS) reviewArgs.checks = CHECKS
   if (MODEL) reviewArgs.implementerModel = MODEL
+  if (intent) reviewArgs.intent = intent
   const { result: review, error } = await runChild(input.reviewScript, reviewArgs, 'review workflow')
 
   const entry = {
@@ -346,6 +393,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     dimensions: dimensions.map(({ key, title, files }) => ({ key, title, files })),
     unassignedFiles: missing,
     dirtyAtLaunch: state.dirtyAtLaunch,
+    intent,
     review,
     error,
     triage: null,
@@ -366,6 +414,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   const fixed = findings.filter((f) => f.outcome === 'fixed')
   const covered = findings.filter((f) => f.outcome === 'covered')
   const resolved = fixed.length + covered.length
+  const resolvedCounted = [...fixed, ...covered].filter((f) => COUNTED.includes(f.severity)).length
   const counts = {
     finders: dimensions.length,
     finderFailures: (review.finderFailures || []).length,
@@ -374,6 +423,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     fixed: fixed.length,
     covered: covered.length,
     resolved,
+    resolvedMediumOrHigher: resolvedCounted,
   }
 
   // A covered severe finding was closed by its coverer's change, so that change
@@ -398,8 +448,8 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   if (triage.productionIds.length) {
     reasons.push(`${triage.productionIds.length} critical/high fix(es) changed production behaviour (#${triage.productionIds.join(', #')})`)
   }
-  if (resolved >= dimensions.length) {
-    reasons.push(`${resolved} issue(s) fixed or covered, at least as many as the ${dimensions.length} finder(s)`)
+  if (resolvedCounted >= dimensions.length) {
+    reasons.push(`${resolvedCounted} medium-or-higher issue(s) fixed or covered, at least as many as the ${dimensions.length} finder(s)`)
   }
   if (counts.finderFailures) {
     reasons.push(`finder(s) ${review.finderFailures.join(', ')} failed, so their dimension was never reviewed`)
@@ -415,7 +465,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   }
   if (reasons.length === 0) {
     stopReason = 'converged'
-    log(`round ${round}: ${counts.resolved} issue(s) resolved by ${counts.finders} finder(s), none severe in production code; the review loop is done`)
+    log(`round ${round}: ${counts.resolved} issue(s) resolved by ${counts.finders} finder(s), ${counts.resolvedMediumOrHigher} of them medium or higher, none severe in production code; the review loop is done`)
     break
   }
   log(`round ${round}: ${counts.resolved} issue(s) resolved by ${counts.finders} finder(s); another round because ${reasons.join('; ')}`)
