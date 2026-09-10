@@ -41,11 +41,17 @@ if (typeof input.context !== 'string' || !input.context.trim()) {
 if (input.implementerModel !== undefined && (typeof input.implementerModel !== 'string' || !input.implementerModel.trim())) {
   throw new Error('args.implementerModel: a model name (e.g. opus, sonnet, haiku) when given; omit it to keep the Fable implementers')
 }
+if (input.intent !== undefined && (typeof input.intent !== 'string' || !input.intent.trim())) {
+  throw new Error("args.intent: a non-empty string when given (the branch's commit messages verbatim, the author's note, or both); omit it otherwise")
+}
 
 const ROOT = input.root
 const BASE = input.base || null
 const DIMENSIONS = input.dimensions
 const CHECKS = typeof input.checks === 'string' && input.checks.trim() ? input.checks.trim() : null
+// The author's intent: commit messages or a note, verbatim. A removal it states
+// is a decision the finders test for breakage, not a loss to restore.
+const INTENT = typeof input.intent === 'string' && input.intent.trim() ? input.intent.trim() : null
 // The implementers run on Fable unless the user picked another model; effort stays tied to severity.
 const IMPLEMENTER_MODEL = input.implementerModel ? input.implementerModel.trim() : 'fable'
 
@@ -79,9 +85,13 @@ function scopeText() {
   return `Review scope: ${SCOPE_LABEL[input.scope]}, i.e. the working tree against base commit ${BASE}. Read a file's hunks with \`git diff ${BASE} -- <path>\`, the pre-change file with \`git show ${BASE}:<path>\`, the file list with \`git diff --stat ${BASE}\`, and the surrounding current code with cat/sed.${untracked}`
 }
 
+const INTENT_TEXT = INTENT
+  ? `\nAuthor's intent for this diff, verbatim (commit messages, the author's note, or both). A removal the intent states is a decision, not a defect, unless it breaks something that still exists:\n<<<\n${INTENT}\n>>>`
+  : ''
+
 const CONTEXT = `Repository: ${ROOT}.
 ${input.context.trim()}
-${scopeText()}
+${scopeText()}${INTENT_TEXT}
 Severity scale: critical = data loss or corruption, a security breach, or a crash of the production process; high = wrong behaviour on a path users hit in normal use, a deadlock, hang or resource leak under normal load, or a security or tenancy gap; medium = wrong behaviour on an edge path, a real leak or race that is hard to hit, a convention violation the project's agent docs state explicitly, or a false statement in docs or comments a maintainer would act on; low = a demonstrably false statement shipped to users (UI copy, translations, docs, error messages), a misleading comment, dead code (an unreachable branch, an unused export, an obsolete option) or stale terminology (a term the project's domain or agent docs mark as avoided, deprecated or replaced, on any surface: prompts, identifiers, comments, copy, docs), or a small robustness issue with no user-visible effect today.`
 
 const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit, create or delete files under ${ROOT}, and run no git command that changes state (no checkout, restore, stash, commit, reset, clean). Scratch files go in /tmp. You may run existing tests and small scripts from /tmp.`
@@ -95,7 +105,7 @@ const BUDGET = {
   critical: 'CRITICAL budget: a contained change of roughly under 60 lines across a few files whose behaviour is easy to reason about and to test.',
 }
 
-const EXCLUDED = `Never auto-applied, whatever the severity: new CI jobs, scripts, config or infrastructure; new abstractions (a wrapper, a predicate, a helper, a module) or changes to exports and public signatures, except removing the export keyword from a symbol the finding shows has no consumer outside its module; DB schema or migration changes; dependency changes; edits to files the finding does not name (except files the clustering attached); tests that assert a still-present bug; tests that read source as text; and findings whose only defect is a missing test.`
+const EXCLUDED = `Never auto-applied, whatever the severity: new CI jobs, scripts, config or infrastructure; new abstractions (a wrapper, a predicate, a helper, a module) or changes to exports and public signatures, except removing the export keyword from a symbol the finding shows has no consumer outside its module; DB schema or migration changes; dependency changes; edits to files the finding does not name (except files the clustering attached); tests that assert a still-present bug; tests that read source as text; findings whose only defect is a missing test; and a warning about a defect in code written into a comment, a doc or a tool description (the fix is the code change: apply it when it fits the budget, otherwise return not_applied with the plan).`
 
 function findingText(e) {
   const sev = e.finalSeverity ?? e.severity
@@ -242,8 +252,11 @@ Rules:
 - Report real defects: wrong behaviour, security or tenancy gaps, races, leaks, data loss, regressions, contradictions between code and docs or copy, dead code, stale terminology (a term the project's domain or agent docs mark as avoided, deprecated or replaced, wherever it appears), and violations of rules you can quote from the project's agent docs.
 - Report each defect once, at its root location (the line whose change fixes it), even when several files you read expose it.
 - ${preExisting}
+- Judge a change by what it breaks, not by which commit carries it. A deletion is a defect only when you can name the code path, user or doc that still depends on what was deleted.
+- An instruction deleted from an LLM prompt or tool description is a defect only when the model, without it, breaks a contract it cannot infer: a format, a limit, a fact about the environment, what the tool accepts or returns. Coaching a current model follows unprompted (work autonomously, batch calls, summarise what it retrieves, retry a weak search, ask specific questions) is not a defect to restore.
 - A demonstrably false statement in user-facing copy, docs or error messages is a finding regardless of audience size. A false statement in a code comment counts only when a maintainer acting on it would introduce a bug or miss one.
-- Missing tests as the sole defect, style preferences without a quotable rule, and speculative hardening are not findings.
+- A missing test is not a finding. A deleted test is one only when it could fail on a plausible regression of code that still exists; a test that recomputes the implementation's formula from the same constants, or asserts what a stub or hand-written mock returns, is not coverage.
+- Style preferences without a quotable rule and speculative hardening are not findings.
 - Give the exact file and line in the current working tree. An empty findings list is a valid answer.`
 }
 
@@ -277,7 +290,13 @@ You are the MATERIALITY skeptic in an adversarial code review. Your job is to at
 ${findingText(e)}
 
 Your verdict is three-way:
-- refute: the finding's substance fails. Valid grounds ONLY: cosmetic-only consequence${preExisting}; or a documented tradeoff that covers this specific regression (an ADR or doc accepting a related fallback does not excuse a new gap in a component that does implement the mechanism).
+- refute: the finding's substance fails. Valid grounds ONLY:
+  - cosmetic-only consequence${preExisting};
+  - a documented tradeoff that covers this specific regression (an ADR or doc accepting a related fallback does not excuse a new gap in a component that does implement the mechanism);
+  - a removal the author's intent states, as a named item or as the general rule the commit applies, when the finding names no surviving code path, user or doc that depends on the deleted thing; a commit made by an earlier round of this review shows none of the author's decisions;
+  - a deleted prompt or tool-description instruction that restates behaviour a current model shows unprompted (working autonomously, batching calls, summarising, retrying a weak search, asking specific questions); the loss is real only for a contract the model cannot infer (a format, a limit, a fact about the environment, what the tool accepts or returns);
+  - a deleted test that could not fail on a plausible regression: one that recomputes the implementation's formula from the same constants, or asserts what a stub or hand-written mock returns.
+  A change lying outside its commit's stated scope is not a ground to confirm; judge it by what it breaks.
 - downgrade: the mechanism is real but the impact is overstated. Severity inflation alone is NEVER a kill ground: downgrade and confirm. Say the severity you settle on.
 - confirm: the finding is material at the finder's severity.
 
