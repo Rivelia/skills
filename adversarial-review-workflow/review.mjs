@@ -99,13 +99,13 @@ const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit
 const DIMENSION_LIST = DIMENSIONS.map((d) => `- ${d.key}: ${d.title}. Files: ${d.files.join(', ')}`).join('\n')
 
 const BUDGET = {
-  low: 'LOW budget: an edit to copy, a comment or a doc, or a single hunk in the file that holds the defect; no new test file.',
+  low: 'LOW budget: a change with no behaviour change, across the files the finding names: copy, comments, docs, a rename, dead-code removal, or a small robustness hunk. No new test file.',
   medium: 'MEDIUM budget: a contained code change in the files the finding names, plus one focused test.',
   high: 'HIGH budget: a contained change of roughly under 60 lines across a few files whose behaviour is easy to reason about and to test.',
   critical: 'CRITICAL budget: a contained change of roughly under 60 lines across a few files whose behaviour is easy to reason about and to test.',
 }
 
-const EXCLUDED = `Never auto-applied, whatever the severity: new CI jobs, scripts, config or infrastructure; new abstractions (a wrapper, a predicate, a helper, a module) or changes to exports and public signatures, except removing the export keyword from a symbol the finding shows has no consumer outside its module; DB schema or migration changes; dependency changes; edits to files the finding does not name (except files the clustering attached); tests that assert a still-present bug; tests that read source as text; findings whose only defect is a missing test; and a warning about a defect in code written into a comment, a doc or a tool description (the fix is the code change: apply it when it fits the budget, otherwise return not_applied with the plan).`
+const EXCLUDED = `Never auto-applied, whatever the severity: new CI jobs, scripts, config or infrastructure; new abstractions (a wrapper, a predicate, a helper, a module) or changes to exports and public signatures, except removing the export keyword from a symbol the finding shows has no consumer outside its module, and except renaming a symbol whose every consumer is in the files the finding names; DB schema or migration changes; dependency changes; edits to files the finding does not name (except files the clustering attached); tests that assert a still-present bug; tests that read source as text; findings whose only defect is a missing test; and a warning about a defect in code written into a comment, a doc or a tool description (the fix is the code change: apply it when it fits the budget, otherwise return not_applied with the plan).`
 
 function findingText(e) {
   const sev = e.finalSeverity ?? e.severity
@@ -198,7 +198,7 @@ const IMPL_SCHEMA = {
     excludedKind: { type: 'boolean', description: 'For not_applied: true when the fix is an excluded kind, false when merely over budget.' },
     coveredBy: { type: ['integer', 'null'], description: 'For covered: the id of the finding whose fix covers this one.' },
     files: { type: 'array', items: { type: 'string' }, description: 'Repo-relative paths you changed or created (empty unless outcome is applied).' },
-    kinds: { type: 'array', items: { type: 'string' }, description: 'e.g. "copy edit", "comment", "single hunk in defect file", "contained code change", "one focused test added", "existing test updated".' },
+    kinds: { type: 'array', items: { type: 'string' }, description: 'e.g. "copy edit", "comment", "rename", "contained code change", "one focused test added", "existing test updated".' },
     hunks: { type: 'string', description: 'The `git diff` (or `git show` after committing) of your change; empty unless outcome is applied.' },
     checks: { type: 'array', items: { type: 'object', properties: { command: { type: 'string' }, result: { type: 'string' } }, required: ['command', 'result'] } },
     committed: { type: 'boolean' },
