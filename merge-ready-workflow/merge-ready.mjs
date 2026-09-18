@@ -4,7 +4,7 @@ export const meta = {
   phases: [
     { title: 'Scout', detail: 'Sonnet records the tree state and the branch log, then Fable (or args.model) designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
-    { title: 'Triage', detail: 'Opus decides whether each fixed critical/high finding changed production behaviour', model: 'opus' },
+    { title: 'Triage', detail: 'Opus classifies each fixed critical/high finding by the kinds of change in its hunks; a production kind means another round', model: 'opus' },
     { title: 'Prepare', detail: 'Sonnet computes the simplify inputs: file list, prune candidates, untracked baseline, tree hash', model: 'sonnet' },
     { title: 'Simplify', detail: 'the simplify-converge workflow (simplify.mjs) over the same scope' },
   ],
@@ -126,23 +126,28 @@ const DIMENSIONS_SCHEMA = {
   required: ['dimensions'],
 }
 
-const TRIAGE_SCHEMA = {
-  type: 'object',
-  properties: {
-    verdicts: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          id: { type: 'integer' },
-          production: { type: 'boolean', description: 'true when the fix changed what shipped code does.' },
-          reason: { type: 'string', description: 'The hunk your verdict rests on.' },
+// The triage answers in the change kinds the review script's result carries,
+// the vocabulary its implementer reported in; the script reads production off
+// the same table.
+function triageSchema(changeKinds) {
+  return {
+    type: 'object',
+    properties: {
+      verdicts: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            kinds: { type: 'array', items: { type: 'string', enum: Object.keys(changeKinds) }, description: 'Every kind of change the fix\'s hunks contain, by key from the list in the prompt.' },
+            reason: { type: 'string', description: 'The hunk each production kind rests on, quoted; for a fix with no production kind, what its hunks are instead.' },
+          },
+          required: ['id', 'kinds', 'reason'],
         },
-        required: ['id', 'production', 'reason'],
       },
     },
-  },
-  required: ['verdicts'],
+    required: ['verdicts'],
+  }
 }
 
 const PREPARE_SCHEMA = {
@@ -231,7 +236,8 @@ function fixLocation(f) {
   return `left uncommitted in the working tree, files ${(f.files || []).join(', ') || '(unreported)'}`
 }
 
-function triagePrompt(round, candidates, findings) {
+function triagePrompt(round, candidates, findings, changeKinds) {
+  const kindList = Object.keys(changeKinds).map((k) => `- ${k}${changeKinds[k].production ? ' (production)' : ''}: ${changeKinds[k].text}`).join('\n')
   const blocks = candidates.map((c) => {
     const fixer = c.outcome === 'covered' && c.coveredBy != null ? findings.find((f) => f.id === c.coveredBy) : null
     const fix = fixer || c
@@ -243,9 +249,10 @@ function triagePrompt(round, candidates, findings) {
 
 ${READ_ONLY}
 
-You are the TRIAGE agent of a looping adversarial code review. Round ${round} just fixed the critical and high findings below. For each one, decide whether its fix CHANGED PRODUCTION BEHAVIOUR. Production behaviour is what shipped code does at runtime: application logic, data handling, queries, API handlers, UI behaviour, configuration the running product reads. A fix that only touched comments, docs, tests, test fixtures or test helpers, CI or build configuration, type annotations with no runtime effect, formatting, log text, or user-facing copy and translations did not change production behaviour. A fix that did both did change it.
+You are the TRIAGE agent of a looping adversarial code review. Round ${round} just fixed the critical and high findings below. For each one, classify its fix by the kinds of change its hunks contain, from this list. The kinds marked production change what shipped code does at runtime; the others do not:
+${kindList}
 
-Read each fix's hunks (pasted below when the implementer reported them, otherwise from git as indicated) and answer production=true only when a hunk changes what shipped code does; quote that hunk in the reason. One verdict per finding id.
+A fix carries every kind its hunks contain: one that changed a comment and a query is comment and logic. The implementer's own kinds are shown for reference; judge from the hunks. Read each fix's hunks (pasted below when the implementer reported them, otherwise from git as indicated), list a production kind only when a hunk changes what shipped code does, and quote that hunk in the reason. One verdict per finding id.
 
 ${blocks}`
 }
@@ -411,6 +418,12 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   for (const f of review.uncommittedFixFiles || []) allUncommittedFixFiles.add(f)
   for (const p of review.possiblyDirty || []) allPossiblyDirty.add(p)
   for (const fx of review.fixes || []) allFixes.push({ round, ...fx })
+  const changeKinds = review.changeKinds
+  if (!changeKinds || typeof changeKinds !== 'object' || Object.keys(changeKinds).length === 0) {
+    stopReason = 'review-failed'
+    stopDetail = `round ${round}: the review workflow returned no changeKinds table; the adversarial-review-workflow skill is older than this one`
+    break
+  }
 
   const findings = review.findings || []
   const fixed = findings.filter((f) => f.outcome === 'fixed')
@@ -443,13 +456,16 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   const triage = { candidates: severe.map((f) => f.id), verdicts: [], failed: false, productionIds: [] }
   if (severe.length) {
     phase('Triage')
-    const t = await run(triagePrompt(round, severe, findings), { label: `triage @${round}`, phase: 'Triage', schema: TRIAGE_SCHEMA, ...TRIAGE_OPTS })
+    const t = await run(triagePrompt(round, severe, findings, changeKinds), { label: `triage @${round}`, phase: 'Triage', schema: triageSchema(changeKinds), ...TRIAGE_OPTS })
     if (!t) {
       triage.failed = true
       triage.productionIds = severe.map((f) => f.id)
       log(`round ${round}: the triage agent died; every severe fix is assumed to have changed production behaviour`)
     } else {
-      triage.verdicts = t.verdicts.filter((v) => severe.some((f) => f.id === v.id))
+      const isProduction = (v) => v.kinds.some((k) => changeKinds[k] && changeKinds[k].production)
+      triage.verdicts = t.verdicts
+        .filter((v) => severe.some((f) => f.id === v.id))
+        .map((v) => ({ id: v.id, kinds: v.kinds, production: isProduction(v), reason: v.reason }))
       triage.productionIds = triage.verdicts.filter((v) => v.production).map((v) => v.id)
     }
   }

@@ -105,7 +105,44 @@ const BUDGET = {
   critical: 'CRITICAL budget: a contained change of roughly under 60 lines across a few files whose behaviour is easy to reason about and to test.',
 }
 
-const EXCLUDED = `Never auto-applied, whatever the severity: new CI jobs, scripts, config or infrastructure; new abstractions (a wrapper, a predicate, a helper, a module) or changes to exports and public signatures, except removing the export keyword from a symbol the finding shows has no consumer outside its module, and except renaming a symbol whose every consumer is in the files the finding names; DB schema or migration changes; dependency changes; edits to files the finding does not name (except files the clustering attached); tests that assert a still-present bug; tests that read source as text; findings whose only defect is a missing test; and a warning about a defect in code written into a comment, a doc or a tool description (the fix is the code change: apply it when it fits the budget, otherwise return not_applied with the plan).`
+// One vocabulary for what a fix is made of. The implementer reports its fix in
+// these kinds, and the merge-ready triage judges a fix in the same ones, reading
+// the table from this script's result. `production` marks the kinds that change
+// what shipped code does at runtime.
+const CHANGE_KINDS = {
+  logic: { production: true, text: 'a change to what shipped code does: application logic, data handling, queries, API handlers, UI behaviour; a helper local to the file it fixes is part of it' },
+  config: { production: true, text: 'configuration the running product reads' },
+  robustness: { production: true, text: 'a small guard or fallback with no user-visible effect today' },
+  rename: { production: false, text: 'a symbol renamed with every consumer updated and nothing else changed' },
+  'dead-code': { production: false, text: 'unreachable or unused code removed' },
+  types: { production: false, text: 'type annotations with no runtime effect' },
+  format: { production: false, text: 'formatting only' },
+  comment: { production: false, text: 'comments and docstrings' },
+  docs: { production: false, text: 'docs, agent docs, tool and prompt descriptions' },
+  copy: { production: false, text: 'user-facing copy, error message text and translations' },
+  'log-text': { production: false, text: 'log message text' },
+  test: { production: false, text: 'tests, fixtures and test helpers, added or updated' },
+  'ci-build': { production: false, text: 'existing CI or build configuration' },
+}
+const CHANGE_KEYS = Object.keys(CHANGE_KINDS)
+const CHANGE_KINDS_TEXT = `Report the kinds of change in your fix from this list, by key, every kind the hunks contain:\n${CHANGE_KEYS.map((k) => `- ${k}: ${CHANGE_KINDS[k].text}`).join('\n')}`
+
+// The kinds of fix never auto-applied, each with the key the implementer
+// reports when it refuses one.
+const EXCLUSIONS = {
+  'new-infra': 'a new CI job, script, config file or infrastructure',
+  abstraction: 'a new symbol another file imports',
+  'public-api': 'an export or public signature changed, beyond dropping an export or renaming a symbol whose every consumer is in the files the finding names',
+  schema: 'the DB schema, a new migration, or a migration present at the base commit (every migration in a codebase review)',
+  dependency: 'a dependency change',
+  'unnamed-file': 'a file neither the finding nor the clustering named',
+  'bug-asserting-test': 'a test asserting a still-present bug',
+  'source-reading-test': 'a test reading source as text',
+  'missing-test-only': 'a finding whose only defect is a missing test',
+  'warning-in-prose': 'a defect in code warned about in a comment, doc or tool description; the fix is the code change',
+}
+const EXCLUSION_KEYS = Object.keys(EXCLUSIONS)
+const EXCLUDED = `Never auto-applied, whatever the severity; report the key as excludedKind:\n${EXCLUSION_KEYS.map((k) => `- ${k}: ${EXCLUSIONS[k]}`).join('\n')}`
 
 function findingText(e) {
   const sev = e.finalSeverity ?? e.severity
@@ -195,10 +232,10 @@ const IMPL_SCHEMA = {
     outcome: { type: 'string', enum: ['applied', 'covered', 'not_applied', 'reverted'], description: 'applied: a fix is in the tree (committed or not). covered: an earlier accepted fix already closes it, nothing changed. not_applied: over budget or an excluded kind, nothing changed. reverted: you applied a fix, a check could not pass within the budget, and you undid your own hunks.' },
     plan: { type: 'string', description: 'The smallest fix you identified, in enough detail for a maintainer to apply it by hand.' },
     reason: { type: 'string', description: 'Why you did or did not apply it: fits budget / over budget (which budget line) / excluded kind (which) / covered / which check could not pass.' },
-    excludedKind: { type: 'boolean', description: 'For not_applied: true when the fix is an excluded kind, false when merely over budget.' },
+    excludedKind: { type: ['string', 'null'], enum: [...EXCLUSION_KEYS, null], description: 'For not_applied: the key of the excluded kind that applies; null when merely over budget, and for every other outcome.' },
     coveredBy: { type: ['integer', 'null'], description: 'For covered: the id of the finding whose fix covers this one.' },
     files: { type: 'array', items: { type: 'string' }, description: 'Repo-relative paths you changed or created (empty unless outcome is applied).' },
-    kinds: { type: 'array', items: { type: 'string' }, description: 'e.g. "copy edit", "comment", "rename", "contained code change", "one focused test added", "existing test updated".' },
+    kinds: { type: 'array', items: { type: 'string', enum: CHANGE_KEYS }, description: 'Every kind of change in your fix, by key from the list in the prompt; empty unless outcome is applied.' },
     hunks: { type: 'string', description: 'The `git diff` (or `git show` after committing) of your change; empty unless outcome is applied.' },
     checks: { type: 'array', items: { type: 'object', properties: { command: { type: 'string' }, result: { type: 'string' } }, required: ['command', 'result'] } },
     committed: { type: 'boolean' },
@@ -391,16 +428,17 @@ ${priorFixesText()}
 Plan your own fix: read the code around the finding, decide the SMALLEST change that closes it, then check that change against the budget for severity ${sev}:
 ${BUDGET[sev] ?? BUDGET.medium}
 ${EXCLUDED}
+${CHANGE_KINDS_TEXT}
 
 Minimal is relative to the finding, not to any larger plan: when a more complete fix exists beyond the budget, do the part inside the budget and describe the rest in notes. Never extend a fix to a sibling component the finding did not name (that is a new finding). Cheap means small relative to the finding, not quick to type. Follow the project's agent docs for any code or test you write; a test must never add complexity to production code (no test-only parameters, seams or exports).
 
-If the smallest fix does not fit the budget or is an excluded kind, change nothing and return outcome=not_applied with the plan, the reason and excludedKind.
+If the smallest fix does not fit the budget or is an excluded kind, change nothing and return outcome=not_applied with the plan, the reason and, for an excluded kind, its key as excludedKind.
 
 When it fits: make the change. ${checksText()}
 
 Commit rule: when none of the files you changed or created is protected, commit the fix yourself: \`git add <exactly your files>\`, then \`git commit\` with a message in the project's commit convention (from the context above; default \`type(scope): subject\`), with no attribution lines or trailers; report committed=true and the sha. When any file you changed is protected, leave the whole fix uncommitted and report committed=false: never commit a whole file to get around the overlap.
 
-Report outcome=applied with exactly the files and hunks you changed (paste the diff), the kinds of change, every check command with its result, and the commit state. Finish with \`git status --porcelain\` and make sure your report matches it: nothing of yours may remain in the tree after not_applied, covered or reverted.`
+Report outcome=applied with exactly the files and hunks you changed (paste the diff), the kinds of change by key, every check command with its result, and the commit state. Finish with \`git status --porcelain\` and make sure your report matches it: nothing of yours may remain in the tree after not_applied, covered or reverted.`
 }
 
 function siblingPrompt(s, lead, fix) {
@@ -637,7 +675,7 @@ async function implement(e, siblings) {
   }
   if (impl.outcome === 'not_applied') {
     e.outcome = 'not_fixed'
-    log(`#${e.id} not auto-fixed: ${impl.excludedKind ? 'excluded kind' : 'over budget'}`)
+    log(`#${e.id} not auto-fixed: ${impl.excludedKind ? `excluded kind ${impl.excludedKind}` : 'over budget'}`)
     return
   }
   if (impl.outcome === 'reverted') {
@@ -687,6 +725,8 @@ return {
   implementerModel: IMPLEMENTER_MODEL,
   base: BASE,
   checksConfigured: CHECKS !== null,
+  changeKinds: CHANGE_KINDS,
+  excludedKinds: EXCLUSIONS,
   finderFailures,
   clusters,
   fixes: priorFixes,
