@@ -13,7 +13,9 @@ export const meta = {
 const SCOPES = ['uncommitted', 'branch', 'unpushed', 'codebase']
 const SEVERE = ['critical', 'high']
 // Fixes that count toward another round: a low fix (copy, a comment, dead
-// code) leaves nothing new for fresh finders to find.
+// code) leaves nothing new for fresh finders to find. Another round is
+// justified when at least half the finders reported one: their attention went to the
+// issues they found, so what they did not reach is still there.
 const COUNTED = ['medium', 'high', 'critical']
 // Backstop only: the loop ends on its own once a round fixes too little to
 // justify another. Each round spends a few dozen agents and the simplify
@@ -414,7 +416,15 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   const fixed = findings.filter((f) => f.outcome === 'fixed')
   const covered = findings.filter((f) => f.outcome === 'covered')
   const resolved = fixed.length + covered.length
-  const resolvedCounted = [...fixed, ...covered].filter((f) => COUNTED.includes(f.severity)).length
+  const resolvedCounted = [...fixed, ...covered].filter((f) => COUNTED.includes(f.severity))
+  // A finder that reported a resolved finding, first or as a duplicate the
+  // dedup attached, spent its round on it.
+  const finderKeys = new Set(dimensions.map((d) => d.key))
+  const productiveFinders = new Set(
+    resolvedCounted
+      .flatMap((f) => [f.dimension, ...(f.alsoReportedBy || []).map((r) => r.dimension)])
+      .filter((k) => finderKeys.has(k)),
+  )
   const counts = {
     finders: dimensions.length,
     finderFailures: (review.finderFailures || []).length,
@@ -423,7 +433,8 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     fixed: fixed.length,
     covered: covered.length,
     resolved,
-    resolvedMediumOrHigher: resolvedCounted,
+    resolvedMediumOrHigher: resolvedCounted.length,
+    productiveFinders: productiveFinders.size,
   }
 
   // A covered severe finding was closed by its coverer's change, so that change
@@ -448,8 +459,8 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   if (triage.productionIds.length) {
     reasons.push(`${triage.productionIds.length} critical/high fix(es) changed production behaviour (#${triage.productionIds.join(', #')})`)
   }
-  if (resolvedCounted >= dimensions.length) {
-    reasons.push(`${resolvedCounted} medium-or-higher issue(s) fixed or covered, at least as many as the ${dimensions.length} finder(s)`)
+  if (productiveFinders.size * 2 >= dimensions.length) {
+    reasons.push(`${productiveFinders.size} of ${dimensions.length} finder(s) reported a medium-or-higher issue that was fixed or covered (${[...productiveFinders].join(', ')})`)
   }
   if (counts.finderFailures) {
     reasons.push(`finder(s) ${review.finderFailures.join(', ')} failed, so their dimension was never reviewed`)
@@ -465,7 +476,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   }
   if (reasons.length === 0) {
     stopReason = 'converged'
-    log(`round ${round}: ${counts.resolved} issue(s) resolved by ${counts.finders} finder(s), ${counts.resolvedMediumOrHigher} of them medium or higher, none severe in production code; the review loop is done`)
+    log(`round ${round}: ${counts.resolved} issue(s) resolved, ${counts.resolvedMediumOrHigher} of them medium or higher from ${counts.productiveFinders} of ${counts.finders} finder(s), none severe in production code; the review loop is done`)
     break
   }
   log(`round ${round}: ${counts.resolved} issue(s) resolved by ${counts.finders} finder(s); another round because ${reasons.join('; ')}`)
