@@ -1,21 +1,22 @@
 export const meta = {
   name: 'merge-ready',
-  description: 'Repeat the adversarial code review over a scope, re-scouting the finders each round, until a round fixes nothing severe in production code and fewer medium-or-higher issues than it had finders; then simplify the same scope',
+  description: 'Repeat the adversarial code review over a scope, re-scouting the finders each round, until a round fixes nothing medium or higher that changes production behaviour and fewer than half its finders reported a medium-or-higher fix; then simplify the same scope',
   phases: [
     { title: 'Scout', detail: 'Sonnet records the tree state and the branch log, then Fable (or args.model) designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
-    { title: 'Triage', detail: 'Opus classifies each fixed critical/high finding by the kinds of change in its hunks; a production kind means another round', model: 'opus' },
+    { title: 'Triage', detail: 'Opus classifies each fixed medium-or-higher finding by the kinds of change in its hunks; a production kind means another round', model: 'opus' },
     { title: 'Prepare', detail: 'Sonnet computes the simplify inputs: file list, prune candidates, untracked baseline, tree hash', model: 'sonnet' },
     { title: 'Simplify', detail: 'the simplify-converge workflow (simplify.mjs) over the same scope' },
   ],
 }
 
 const SCOPES = ['uncommitted', 'branch', 'unpushed', 'codebase']
-const SEVERE = ['critical', 'high']
-// Fixes that count toward another round: a low fix (copy, a comment, dead
-// code) leaves nothing new for fresh finders to find. Another round is
-// justified when at least half the finders reported one: their attention went to the
-// issues they found, so what they did not reach is still there.
+// Fixes that can justify another round, two ways. A medium-or-higher fix whose
+// hunks change what shipped code does gives fresh finders new behaviour to
+// attack. And when at least half the finders reported a medium-or-higher fix,
+// production or not, their attention went to the issues they found, so what
+// they did not reach is still there. A low fix (copy, a comment, dead code)
+// counts for neither.
 const COUNTED = ['medium', 'high', 'critical']
 // Backstop only: the loop ends on its own once a round fixes too little to
 // justify another. Each round spends a few dozen agents and the simplify
@@ -249,7 +250,7 @@ function triagePrompt(round, candidates, findings, changeKinds) {
 
 ${READ_ONLY}
 
-You are the TRIAGE agent of a looping adversarial code review. Round ${round} just fixed the critical and high findings below. For each one, classify its fix by the kinds of change its hunks contain, from this list. The kinds marked production change what shipped code does at runtime; the others do not:
+You are the TRIAGE agent of a looping adversarial code review. Round ${round} just fixed the medium, high and critical findings below. For each one, classify its fix by the kinds of change its hunks contain, from this list. The kinds marked production change what shipped code does at runtime; the others do not:
 ${kindList}
 
 A fix carries every kind its hunks contain: one that changed a comment and a query is comment and logic. The implementer's own kinds are shown for reference; judge from the hunks. Read each fix's hunks (pasted below when the implementer reported them, otherwise from git as indicated), list a production kind only when a hunk changes what shipped code does, and quote that hunk in the reason. One verdict per finding id.
@@ -429,12 +430,14 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   const fixed = findings.filter((f) => f.outcome === 'fixed')
   const covered = findings.filter((f) => f.outcome === 'covered')
   const resolved = fixed.length + covered.length
-  const resolvedCounted = [...fixed, ...covered].filter((f) => COUNTED.includes(f.severity))
+  // A covered finding was closed by its coverer's change, so that change is the
+  // one triaged.
+  const candidates = [...fixed, ...covered].filter((f) => COUNTED.includes(f.severity))
   // A finder that reported a resolved finding, first or as a duplicate the
   // dedup attached, spent its round on it.
   const finderKeys = new Set(dimensions.map((d) => d.key))
   const productiveFinders = new Set(
-    resolvedCounted
+    candidates
       .flatMap((f) => [f.dimension, ...(f.alsoReportedBy || []).map((r) => r.dimension)])
       .filter((k) => finderKeys.has(k)),
   )
@@ -446,25 +449,22 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     fixed: fixed.length,
     covered: covered.length,
     resolved,
-    resolvedMediumOrHigher: resolvedCounted.length,
+    resolvedMediumOrHigher: candidates.length,
     productiveFinders: productiveFinders.size,
   }
 
-  // A covered severe finding was closed by its coverer's change, so that change
-  // is the one triaged.
-  const severe = findings.filter((f) => SEVERE.includes(f.severity) && (f.outcome === 'fixed' || f.outcome === 'covered'))
-  const triage = { candidates: severe.map((f) => f.id), verdicts: [], failed: false, productionIds: [] }
-  if (severe.length) {
+  const triage = { candidates: candidates.map((f) => f.id), verdicts: [], failed: false, productionIds: [] }
+  if (candidates.length) {
     phase('Triage')
-    const t = await run(triagePrompt(round, severe, findings, changeKinds), { label: `triage @${round}`, phase: 'Triage', schema: triageSchema(changeKinds), ...TRIAGE_OPTS })
+    const t = await run(triagePrompt(round, candidates, findings, changeKinds), { label: `triage @${round}`, phase: 'Triage', schema: triageSchema(changeKinds), ...TRIAGE_OPTS })
     if (!t) {
       triage.failed = true
-      triage.productionIds = severe.map((f) => f.id)
-      log(`round ${round}: the triage agent died; every severe fix is assumed to have changed production behaviour`)
+      triage.productionIds = candidates.map((f) => f.id)
+      log(`round ${round}: the triage agent died; every medium-or-higher fix is assumed to have changed production behaviour`)
     } else {
       const isProduction = (v) => v.kinds.some((k) => changeKinds[k] && changeKinds[k].production)
       triage.verdicts = t.verdicts
-        .filter((v) => severe.some((f) => f.id === v.id))
+        .filter((v) => candidates.some((f) => f.id === v.id))
         .map((v) => ({ id: v.id, kinds: v.kinds, production: isProduction(v), reason: v.reason }))
       triage.productionIds = triage.verdicts.filter((v) => v.production).map((v) => v.id)
     }
@@ -473,7 +473,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
 
   const reasons = []
   if (triage.productionIds.length) {
-    reasons.push(`${triage.productionIds.length} critical/high fix(es) changed production behaviour (#${triage.productionIds.join(', #')})`)
+    reasons.push(`${triage.productionIds.length} medium-or-higher fix(es) changed production behaviour (#${triage.productionIds.join(', #')})`)
   }
   if (productiveFinders.size * 2 >= dimensions.length) {
     reasons.push(`${productiveFinders.size} of ${dimensions.length} finder(s) reported a medium-or-higher issue that was fixed or covered (${[...productiveFinders].join(', ')})`)
@@ -492,7 +492,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   }
   if (reasons.length === 0) {
     stopReason = 'converged'
-    log(`round ${round}: ${counts.resolved} issue(s) resolved, ${counts.resolvedMediumOrHigher} of them medium or higher from ${counts.productiveFinders} of ${counts.finders} finder(s), none severe in production code; the review loop is done`)
+    log(`round ${round}: ${counts.resolved} issue(s) resolved, ${counts.resolvedMediumOrHigher} of them medium or higher from ${counts.productiveFinders} of ${counts.finders} finder(s), none of those in production code; the review loop is done`)
     break
   }
   log(`round ${round}: ${counts.resolved} issue(s) resolved by ${counts.finders} finder(s); another round because ${reasons.join('; ')}`)
