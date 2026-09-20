@@ -22,6 +22,7 @@ Turn everything that landed after a version or a commit into patch notes for the
    - A bullet is the headline of a change; the details stay in the product for the reader to discover.
    - A new feature too large for one sentence keeps that sentence and adds at most four sub-bullets, each a headline of what the reader can now do, under the same word cap. Fixes and improvements stay single lines.
    - Commits that are parts of one change (a feature and its migration, a fix and its follow-up, a fix to a feature released in the same range) become one bullet.
+   - The reverse holds for a squashed commit that bundles several loosely related or unrelated changes: it splits into one bullet per change, as if each had landed as its own commit, and the folding above then applies among those parts, so its migrations, review fixes and tests join the change they serve.
    - Internal work (CI, tests, refactors, dependency updates, agent docs) appears only through its effect on the reader, phrased as that effect, else dropped.
    - With `author`, every bullet ends with its author's name in parentheses, every author when commits were folded; sub-bullets carry none, their feature's bullet does.
 
