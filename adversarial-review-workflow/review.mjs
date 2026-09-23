@@ -6,7 +6,7 @@ export const meta = {
     { title: 'Dedup', detail: 'Sonnet intake check against the registered findings', model: 'sonnet' },
     { title: 'Verify', detail: 'materiality skeptic, then technical skeptic', model: 'opus' },
     { title: 'Cluster', detail: 'group confirmed findings by root cause', model: 'opus' },
-    { title: 'Implement', detail: 'one implementer per cluster (Fable unless args.implementerModel overrides), strictly sequential, commits its own fix' },
+    { title: 'Implement', detail: 'one implementer per cluster (the session model unless args.implementerModel overrides), strictly sequential, commits its own fix' },
     { title: 'Cover', detail: 'Opus check whether a cluster fix also closes its siblings', model: 'opus' },
     { title: 'Cleanup', detail: 'Sonnet tree restore after a dead implementer', model: 'sonnet' },
   ],
@@ -39,7 +39,7 @@ if (typeof input.context !== 'string' || !input.context.trim()) {
   throw new Error('args.context: a string describing the project (stack, agent docs to quote, commit convention) is required')
 }
 if (input.implementerModel !== undefined && (typeof input.implementerModel !== 'string' || !input.implementerModel.trim())) {
-  throw new Error('args.implementerModel: a model name (e.g. opus, sonnet, haiku) when given; omit it to keep the Fable implementers')
+  throw new Error('args.implementerModel: a model name (e.g. opus, sonnet, haiku) when given; omit it to run the implementers on the session model')
 }
 if (input.intent !== undefined && (typeof input.intent !== 'string' || !input.intent.trim())) {
   throw new Error("args.intent: a non-empty string when given (the branch's commit messages verbatim, the author's note, or both); omit it otherwise")
@@ -52,8 +52,8 @@ const CHECKS = typeof input.checks === 'string' && input.checks.trim() ? input.c
 // The author's intent: commit messages or a note, verbatim. A removal it states
 // is a decision the finders test for breakage, not a loss to restore.
 const INTENT = typeof input.intent === 'string' && input.intent.trim() ? input.intent.trim() : null
-// The implementers run on Fable unless the user picked another model; effort stays tied to severity.
-const IMPLEMENTER_MODEL = input.implementerModel ? input.implementerModel.trim() : 'fable'
+// The implementers inherit the session model unless the user picked another; effort stays tied to severity.
+const IMPLEMENTER_MODEL = input.implementerModel ? input.implementerModel.trim() : null
 
 const FINDER_OPTS = { model: 'opus', effort: 'high' }
 const DEDUP_OPTS = { model: 'sonnet', effort: 'low' }
@@ -62,7 +62,7 @@ const TECHNICAL_OPTS = { model: 'opus', effort: 'high' }
 const CLUSTER_OPTS = { model: 'opus', effort: 'medium' }
 const SIBLING_OPTS = { model: 'opus', effort: 'high' }
 const CLEANUP_OPTS = { model: 'sonnet', effort: 'low' }
-const implementerOpts = (severity) => ({ model: IMPLEMENTER_MODEL, effort: severity === 'low' ? 'medium' : 'high' })
+const implementerOpts = (severity) => ({ ...(IMPLEMENTER_MODEL ? { model: IMPLEMENTER_MODEL } : {}), effort: severity === 'low' ? 'low' : 'medium' })
 
 // ---------- shared prompt fragments ----------
 
@@ -592,7 +592,7 @@ function registerAndVerify(f, dim) {
 // ---------- Find + Dedup + Verify, no barriers between them ----------
 
 phase('Find')
-log(`scope ${input.scope}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, ${DIMENSIONS.length} finder dimension(s), ${input.dirtyAtLaunch.length ? `${input.dirtyAtLaunch.length} path(s) dirty at launch` : 'tree clean at launch'}, implementers on ${IMPLEMENTER_MODEL}`)
+log(`scope ${input.scope}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, ${DIMENSIONS.length} finder dimension(s), ${input.dirtyAtLaunch.length ? `${input.dirtyAtLaunch.length} path(s) dirty at launch` : 'tree clean at launch'}, implementers on ${IMPLEMENTER_MODEL || 'the session model'}`)
 
 await parallel(DIMENSIONS.map((d) => async () => {
   const res = await run(finderPrompt(d), { label: `find: ${d.key}`, phase: 'Find', schema: FINDINGS_SCHEMA, ...FINDER_OPTS })

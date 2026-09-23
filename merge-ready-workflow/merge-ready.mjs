@@ -2,7 +2,7 @@ export const meta = {
   name: 'merge-ready',
   description: 'Repeat the adversarial code review over a scope, re-scouting the finders each round, until a round fixes nothing medium or higher that changes production behaviour and fewer than half its finders reported a medium-or-higher fix; then simplify the same scope',
   phases: [
-    { title: 'Scout', detail: 'Sonnet records the tree state and the branch log, then Fable (or args.model) designs the finder dimensions afresh for the round' },
+    { title: 'Scout', detail: 'Sonnet records the tree state and the branch log, then the session model (or args.model) designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
     { title: 'Triage', detail: 'Opus classifies each fixed medium-or-higher finding by the kinds of change in its hunks; a production kind means another round', model: 'opus' },
     { title: 'Prepare', detail: 'Sonnet computes the simplify inputs: file list, prune candidates, untracked baseline, tree hash', model: 'sonnet' },
@@ -21,7 +21,7 @@ const COUNTED = ['medium', 'high', 'critical']
 // Backstop only: the loop ends on its own once a round fixes too little to
 // justify another. Each round spends a few dozen agents and the simplify
 // phase spends more, all against the harness's 1000-agent lifetime cap.
-const MAX_ROUNDS = 10
+const MAX_ROUNDS = 25
 const DEFAULT_EXCLUDE = '(^|/)(node_modules|vendor|third_party|dist|build|target|generated)/|\\.min\\.|(^|/)(package-lock\\.json|yarn\\.lock|pnpm-lock\\.yaml|Cargo\\.lock|poetry\\.lock|go\\.sum)$|\\.(json|jsonl|csv|tsv|md|mdx|lock|snap|svg|png|jpe?g|gif|ico|webp|pdf|woff2?|ttf|otf|eot|zip|gz|wasm|so|dylib|dll|exe|bin)$'
 
 const input = typeof args === 'string' ? JSON.parse(args) : args
@@ -62,13 +62,13 @@ const EXCLUDE = input.excludePattern ? input.excludePattern.trim() : DEFAULT_EXC
 // The author's note on what the diff deliberately does, when the user gave one;
 // the branch's commit messages are collected by the state agent every round.
 const INTENT_NOTE = input.intent ? input.intent.trim() : null
-// The model argument replaces Fable wherever it is the default: the scout here,
-// the review implementers, the simplify appliers. Every other agent keeps its model.
+// The model argument replaces the session model wherever that is the default: the scout
+// here, the review implementers, the simplify appliers. Every other agent keeps its model.
 const MODEL = input.model ? input.model.trim() : undefined
 const PRUNE_EXTS = input.pruneExts.map((e) => (e.startsWith('.') ? e : `.${e}`))
 
 const STATE_OPTS = { model: 'sonnet', effort: 'low' }
-const SCOUT_OPTS = { model: MODEL || 'fable', effort: 'high' }
+const SCOUT_OPTS = MODEL ? { model: MODEL } : {}
 const TRIAGE_OPTS = { model: 'opus', effort: 'medium' }
 const PREPARE_OPTS = { model: 'sonnet', effort: 'low' }
 // ---------- shared prompt fragments ----------
@@ -356,7 +356,7 @@ const allPossiblyDirty = new Set()
 let stopReason = null
 let stopDetail = null
 
-log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_ROUNDS} review round(s), Fable agents on ${MODEL || 'fable'}, simplify afterwards`)
+log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_ROUNDS} review round(s), scout and implementers on ${MODEL || 'the session model'}, simplify afterwards`)
 
 for (let round = 1; round <= MAX_ROUNDS; round++) {
   phase('Scout')
@@ -551,7 +551,7 @@ log(`done: ${rounds.length} review round(s), stop reason ${stopReason}, ${allFix
 return {
   scope: SCOPE,
   base: BASE,
-  model: MODEL || 'fable',
+  model: MODEL || null,
   checksConfigured: CHECKS !== null,
   checkCmdConfigured: CHECK_CMD !== null,
   maxRounds: MAX_ROUNDS,

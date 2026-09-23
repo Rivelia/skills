@@ -4,7 +4,7 @@ export const meta = {
   phases: [
     { title: 'Find', detail: 'read-only agents propose simplifications per batch', model: 'opus' },
     { title: 'Judge', detail: 'independent gatekeepers strike proposals that are not genuine improvements', model: 'opus' },
-    { title: 'Apply', detail: 'implement the approved findings per batch', model: 'fable' },
+    { title: 'Apply', detail: 'implement the approved findings per batch' },
     { title: 'Hash', detail: 'deterministic tree hash after each round', model: 'sonnet' },
     { title: 'Discover', detail: 'list untracked files the appliers did not declare', model: 'sonnet' },
     { title: 'Verify', detail: 'project check command: baseline on sonnet, then an opus fix-up agent after each editing phase', model: 'opus' },
@@ -62,11 +62,11 @@ if (!Array.isArray(input.pruneExts) || input.pruneExts.length === 0) {
   throw new Error('pruneExts: string[] is required, the extensions the candidate lists were filtered on, e.g. [".ts", ".js", ".svelte"]')
 }
 if (!input.root) throw new Error('root: absolute project root path is required')
-// A narrower override than [model effort]: it replaces Fable for the appliers
-// only and leaves every other agent's model alone. The full override wins when
-// both are given.
+// A narrower override than [model effort]: it sets the appliers' model only,
+// which otherwise inherits the session model, and leaves every other agent
+// alone. The full override wins when both are given.
 if (input.applyModel !== undefined && (typeof input.applyModel !== 'string' || !input.applyModel.trim())) {
-  throw new Error('applyModel: a model name (e.g. opus, sonnet, haiku) when given; omit it to keep the Fable appliers')
+  throw new Error('applyModel: a model name (e.g. opus, sonnet, haiku) when given; omit it to run the appliers on the session model')
 }
 
 const BATCH_SIZE = 15
@@ -77,7 +77,7 @@ const MAX_ROUNDS = 100
 // of how cheap the run was asked to be.
 const override = input.model ? { model: input.model, effort: input.effort } : null
 const simplifyOpts = override ?? { model: 'opus', effort: 'high' }
-const applyOpts = override ?? { model: input.applyModel ? input.applyModel.trim() : 'fable', effort: 'high' }
+const applyOpts = override ?? (input.applyModel ? { model: input.applyModel.trim() } : {})
 const removeOpts = override ?? { model: 'opus', effort: 'medium' }
 const judgeOpts = { model: 'opus', effort: 'high' }
 const checkOpts = { model: 'sonnet', effort: 'low' }
