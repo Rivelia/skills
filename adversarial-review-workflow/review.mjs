@@ -92,7 +92,7 @@ const INTENT_TEXT = INTENT
 const CONTEXT = `Repository: ${ROOT}.
 ${input.context.trim()}
 ${scopeText()}${INTENT_TEXT}
-Severity scale: critical = data loss or corruption, a security breach, or a crash of the production process; high = wrong behaviour on a path users hit in normal use, a deadlock, hang or resource leak under normal load, or a security or tenancy gap; medium = wrong behaviour on an edge path, a real leak or race that is hard to hit, a convention violation the project's agent docs state explicitly, or a false statement in docs or comments a maintainer would act on; low = a demonstrably false statement shipped to users (UI copy, translations, docs, error messages), a misleading comment, dead code (an unreachable branch, an unused export, an obsolete option) or stale terminology (a term the project's domain or agent docs mark as avoided, deprecated or replaced, on any surface: prompts, identifiers, comments, copy, docs), or a small robustness issue with no user-visible effect today.`
+Severity scale: critical = data loss or corruption, a security breach, or a crash of the production process; high = wrong behaviour on a path users hit in normal use, a deadlock, hang or resource leak under normal load, a cost or quality regression on every request of an affected configuration (a cache miss, dropped context), or a security or tenancy gap; medium = wrong behaviour on an edge path, a real leak or race that is hard to hit, a convention violation the project's agent docs state explicitly, or a false statement in docs or comments a maintainer would act on; low = a demonstrably false statement shipped to users (UI copy, translations, docs, error messages), a misleading comment, dead code (an unreachable branch, an unused export, an obsolete option) or stale terminology (a term the project's domain or agent docs mark as avoided, deprecated or replaced, on any surface: prompts, identifiers, comments, copy, docs), or a small robustness issue with no user-visible effect today.`
 
 const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit, create or delete files under ${ROOT}, and run no git command that changes state (no checkout, restore, stash, commit, reset, clean). Scratch files go in /tmp. You may run existing tests and small scripts from /tmp.`
 
@@ -188,8 +188,8 @@ const DEDUP_SCHEMA = {
 const MATERIALITY_SCHEMA = {
   type: 'object',
   properties: {
-    verdict: { type: 'string', enum: ['refute', 'downgrade', 'confirm'] },
-    severity: { type: 'string', enum: SEVERITIES, description: 'The severity you settle on: for downgrade the new one, for confirm the finder\'s.' },
+    verdict: { type: 'string', enum: ['refute', 'downgrade', 'upgrade', 'confirm'] },
+    severity: { type: 'string', enum: SEVERITIES, description: 'The severity you settle on: for downgrade or upgrade the new one, for confirm the finding\'s.' },
     reason: { type: 'string' },
   },
   required: ['verdict', 'severity', 'reason'],
@@ -270,7 +270,7 @@ function finderPrompt(d) {
   const own = d.files.map((f) => `- ${f}${untrackedInScope.has(f) ? ' (untracked: read whole)' : ''}`).join('\n')
   const preExisting = input.scope === 'codebase'
     ? 'There is no base, so every defect in the files counts, whatever its age.'
-    : `Only defects the diff introduced or worsened. Pre-existing conditions the diff did not touch are out of scope unless the diff makes them worse.`
+    : `Only defects the diff introduced or worsened. Pre-existing conditions the diff did not touch are out of scope unless the diff makes them worse. When the author's intent says the diff fixes a failure, an instance of that failure left on a code path the diff changed is an incomplete fix: it counts as introduced, at the severity of the failure itself.`
   return `${CONTEXT}
 
 ${READ_ONLY}
@@ -317,7 +317,7 @@ Answer with the id of the registered finding it duplicates, or null.`
 function materialityPrompt(e, rerun) {
   const preExisting = input.scope === 'codebase'
     ? ''
-    : `; a pre-existing condition the diff neither introduced nor worsened (check with \`git diff ${BASE} -- <file>\` and \`git show ${BASE}:<file>\`)`
+    : `; a pre-existing condition the diff neither introduced nor worsened (check with \`git diff ${BASE} -- <file>\` and \`git show ${BASE}:<file>\`). An incomplete fix is not pre-existing: when the author's intent says the diff fixes a failure, an instance of that failure left on a code path the diff changed counts as introduced, and you judge it at the severity of the failure, not of the false claim`
   return `${CONTEXT}
 
 ${READ_ONLY}
@@ -326,7 +326,7 @@ You are the MATERIALITY skeptic in an adversarial code review. Your job is to at
 
 ${findingText(e)}
 
-Your verdict is three-way:
+Your verdict is four-way:
 - refute: the finding's substance fails. Valid grounds ONLY:
   - cosmetic-only consequence${preExisting};
   - a documented tradeoff that covers this specific regression (an ADR or doc accepting a related fallback does not excuse a new gap in a component that does implement the mechanism);
@@ -334,8 +334,9 @@ Your verdict is three-way:
   - a deleted prompt or tool-description instruction that restates behaviour a current model shows unprompted (working autonomously, batching calls, summarising, retrying a weak search, asking specific questions); the loss is real only for a contract the model cannot infer (a format, a limit, a fact about the environment, what the tool accepts or returns);
   - a deleted test that could not fail on a plausible regression: one that recomputes the implementation's formula from the same constants, or asserts what a stub or hand-written mock returns.
   A change lying outside its commit's stated scope is not a ground to confirm; judge it by what it breaks.
-- downgrade: the mechanism is real but the impact is overstated. Severity inflation alone is NEVER a kill ground: downgrade and confirm. Say the severity you settle on.
-- confirm: the finding is material at the finder's severity.
+- downgrade: the mechanism is real but the impact is overstated. Severity inflation alone is NEVER a kill ground: downgrade and confirm. Say the severity you settle on. A downgrade because the path is rare, the configuration unlikely or the input unusual quotes the config, seed data, docs or callers that show it; without that evidence, keep the finding's severity.
+- upgrade: the mechanism is as described and its consequence sits in a higher tier of the severity scale than the finding claims. Quote the code, config or callers that place it there, and say the severity you settle on.
+- confirm: the finding is material at its stated severity.
 
 Carve-outs, where you may downgrade (e.g. to low) but must not refute:
 - A demonstrably false statement shipped to users (UI copy, translations, user-facing docs, error messages) is material by definition, however small its audience. "Nothing consumes it" and "no decision depends on it" are not valid kill grounds for factual incorrectness.
@@ -495,6 +496,13 @@ async function run(prompt, opts) {
   }
 }
 
+// A materiality verdict moves the severity only when it says so and names a
+// valid one; confirm keeps the severity the skeptic was shown.
+function settledSeverity(mat, current) {
+  const moves = mat.verdict === 'downgrade' || mat.verdict === 'upgrade'
+  return moves && SEVERITIES.includes(mat.severity) ? mat.severity : current
+}
+
 async function verify(e) {
   const mat = await run(materialityPrompt(e, false), { label: `materiality #${e.id}`, phase: 'Verify', schema: MATERIALITY_SCHEMA, ...MATERIALITY_OPTS })
   if (!mat) {
@@ -510,7 +518,7 @@ async function verify(e) {
     log(`#${e.id} refuted on materiality`)
     return
   }
-  e.finalSeverity = mat.verdict === 'downgrade' && SEVERITIES.includes(mat.severity) ? mat.severity : e.severity
+  e.finalSeverity = settledSeverity(mat, e.severity)
 
   const tech = await run(technicalPrompt(e), { label: `technical #${e.id}`, phase: 'Verify', schema: TECHNICAL_SCHEMA, ...TECHNICAL_OPTS })
   if (!tech) {
@@ -545,7 +553,7 @@ async function verify(e) {
         log(`#${e.id} refuted on materiality after correction`)
         return
       }
-      if (mat2.verdict === 'downgrade' && SEVERITIES.includes(mat2.severity)) e.finalSeverity = mat2.severity
+      e.finalSeverity = settledSeverity(mat2, e.finalSeverity)
     }
   }
   e.status = 'confirmed'
