@@ -84,7 +84,7 @@ const checkOpts = { model: 'sonnet', effort: 'low' }
 
 const GROUPS = ['Performance improvements', 'Code simplifications', 'Bug fixes']
 
-const SIMPLIFY = `You are the FINDER in an automated code-simplification loop. Read the code in scope and return every refinement worth making as a finding. Do not edit any files; separate agents apply the findings. An independent judge rejects any finding that is not a genuine improvement, and only approved findings are applied.
+const SIMPLIFY = `You are the FINDER in an automated code-simplification loop. Read the code in scope and return every refinement worth making as a finding. Do not edit any files; separate agents apply the findings.
 
 Propose refinements that:
 
@@ -92,28 +92,13 @@ Propose refinements that:
 
 2. **Follow project standards**: apply the coding standards from CLAUDE.md/AGENTS.md and the docs they reference: naming, imports, error handling, everything they establish.
 
-3. **Improve clarity**:
+3. **Improve clarity, not compactness**: less nesting, less duplication, clearer names, related logic in one place. Readable and maintainable beats clever and short: a switch or an if/else chain beats a nested ternary, and a helpful abstraction stays even when inlining it would save lines.
 
-   - Reduce unnecessary complexity and nesting
-   - Eliminate redundant code and abstractions
-   - Improve readability through clear variable and function names
-   - Consolidate related logic
-   - Remove comments that restate obvious code
-   - Prefer switch statements or if/else chains over nested ternaries
-   - Choose clarity over brevity; explicit code is often better than overly compact code
-
-4. **Keep the balance**: readable and maintainable beats clever and compact. Do not propose refinements that:
-
-   - Combine too many concerns into a single function or component
-   - Remove helpful abstractions that improve code organization
-   - Trade readability for fewer lines (nested ternaries, dense one-liners)
-   - Make the code harder to debug or extend
-
-5. **Scope**: $ARGUMENTS
+4. **Scope**: $ARGUMENTS
 
 Each finding names the group it belongs to (${GROUPS.join(', ')}), the files involved, and a description concrete enough for another agent to implement without seeing your reasoning: name the construct and state exactly what to change and how. A finding may involve creating a new file when extracting shared logic genuinely simplifies the code.
 
-The same files are re-examined by fresh agents every round until a round finds nothing; only then can the process finish. Returning ZERO findings is the expected, successful terminal state for code that is already in good shape, not a failure to contribute. Marginal, cosmetic, or judgment-call refinements never clear the bar: renaming an already-clear identifier, extracting a single-use helper, restructuring code that is already readable. If you find yourself weighing whether a particular change is worth proposing, drop that change and report only the ones you are sure of.`
+The same files are re-examined by fresh agents every round until a round finds nothing; only then can the process finish. Returning zero findings is the expected, successful terminal state for code that is already in good shape, not a failure to contribute. Marginal, cosmetic, or judgment-call refinements never clear the bar: renaming an already-clear identifier, extracting a single-use helper, restructuring code that is already readable. If you find yourself weighing whether a particular change is worth proposing, drop that change and report only the ones you are sure of.`
 
 const FINDINGS_SCHEMA = {
   type: 'object',
@@ -236,9 +221,9 @@ const SCOPE_INSTRUCTIONS = {
   codebase: () => `Read the current file. Classify EVERY comment in it.`,
 }
 
-const RULES = `The ONLY allowed comments are:
+const RULES = `Only two kinds of comment are allowed:
 1. JSDoc comments documenting a function/type/module API.
-2. Comments adding context that CANNOT be inferred by reading the code (external constraints, protocol quirks, security rationale, non-obvious invariants, links to specs/bugs). Rule 2 has a second, equally mandatory half: the context must be needed to read, change or debug the code that is ACTUALLY THERE. Apply this test to every rule-2 candidate: "which line would a reader misread, or break on their next edit, if this comment were gone?" Name that line. If you cannot name one, rule 2 does not apply and the comment is a removal candidate.
+2. Comments adding context that cannot be inferred by reading the code (external constraints, protocol quirks, security rationale, non-obvious invariants, links to specs/bugs). Rule 2 has a second, equally mandatory half: the context must be needed to read, change or debug the code that is actually there. Apply this test to every rule-2 candidate: "which line would a reader misread, or break on their next edit, if this comment were gone?" Name that line. If you cannot name one, rule 2 does not apply and the comment is a removal candidate.
 
 Everything else is a removal candidate, especially:
 - Comments explaining what the code does (restating the code).
@@ -277,7 +262,7 @@ const PRUNE_RESULT_SCHEMA = {
   },
 }
 
-const FIND_SWEEP_NOTE = `\n\nThis is a confirmation sweep: every part of the scope has settled and this pass exists to confirm nothing was missed. The expected outcome is ZERO findings. Report only a clear defect or a cross-file inconsistency left by earlier rounds, never a preference.`
+const FIND_SWEEP_NOTE = `\n\nThis is a confirmation sweep: every part of the scope has settled and this pass exists to confirm nothing was missed. The expected outcome is zero findings. Report only a clear defect or a cross-file inconsistency left by earlier rounds, never a preference.`
 
 function fileListBlock(files) {
   return files.map(f => `- ${f}`).join('\n')
@@ -553,12 +538,12 @@ function judgePrompt(findings, isSweep) {
   const sweepNote = isSweep
     ? `\n\nContext: these proposals come from a confirmation sweep. Earlier rounds already refined this scope and every batch had settled, and an approval reopens it for another round. Judge each proposal on the same standard as any other. The sweep exists to catch what earlier rounds genuinely missed, not to relitigate choices they already made.`
     : ''
-  return `You are the independent gatekeeper in an automated code-simplification loop. A finder agent proposed the simplifications below. For each one, read the current code it targets and decide whether applying it would GENUINELY improve the codebase.
+  return `You are the independent gatekeeper in an automated code-simplification loop. A finder agent proposed the simplifications below. For each one, read the current code it targets and decide whether applying it would genuinely improve the codebase.
 
 Proposals (JSON, judge each by its array index, starting at 0):
 ${JSON.stringify(findings, null, 2)}
 
-Approve a proposal only when it clearly preserves behavior AND leaves the code easier to read or maintain by a margin that justifies touching settled code. Reject:
+Approve a proposal only when it clearly preserves behavior and leaves the code easier to read or maintain by a margin that justifies touching settled code. Reject:
 - cosmetic and preference-level changes: renaming an already-clear identifier, reshuffling already-readable code, style churn;
 - anything with any risk of changing behavior;
 - abstractions or extractions that do not remove real duplication;
@@ -935,7 +920,7 @@ Do NOT edit anything. Return the candidates with exact file, approximate line nu
         // may have left behind.
         pruneEdited = true
         return agent(
-          `In repo ${input.root}, remove the following comments, which were classified as non-useful (they restate code or describe stale history). Use Read + Edit. Remove ONLY the comment (and its now-empty line); never touch code. Skip a comment only if it is valid JSDoc, or context a reader needs to correctly read or change a specific nearby line, and name that line in the reason. List every skip in "skipped" as "<comment>: <reason>". Do NOT skip a comment just because it is true, well written, or impossible to infer: a comment that justifies why the code does NOT do something, or defends the design against an alternative absent from the file, is change-log content and must go. Verify each edit leaves valid syntax.
+          `In repo ${input.root}, remove the following comments, which were classified as non-useful (they restate code or describe stale history). Use Read + Edit. Remove only the comment (and its now-empty line); never touch code. Skip a comment only if it is valid JSDoc, or context a reader needs to correctly read or change a specific nearby line, and name that line in the reason. List every skip in "skipped" as "<comment>: <reason>". Do not skip a comment just because it is true, well written, or impossible to infer: a comment that justifies why the code does NOT do something, or defends the design against an alternative absent from the file, is change-log content and must go. Verify each edit leaves valid syntax.
 
 Candidates (JSON):
 ${JSON.stringify(res.candidates, null, 2)}`,
@@ -1082,6 +1067,16 @@ ${JSON.stringify(res.candidates, null, 2)}`,
   prune = { stopReason: 'skipped-simplify-unstable' }
 }
 
+// The report conditions the orchestrator would otherwise derive from the fields
+// below, computed once here so every caller reads the same answer.
+const fullPrune = prune.stopReason !== 'skipped-simplify-unstable'
+const edited = allChanges.length > 0 || globalSeen.size > 1 || (fullPrune && (prune.removed > 0 || prune.distinctTreeStates > 0))
+const editPossible = stopReason === 'hash-unavailable' || (fullPrune && prune.stopReason === 'hash-unavailable')
+const verificationLost = (s) => s === 'baseline-failed' || s === 'fixup-died'
+const unverified = (fullPrune && verificationLost(prune.verificationStatus))
+  || (verificationLost(simplifyVerification) && !(fullPrune && prune.verificationStatus === 'ran'))
+const noCheck = simplifyVerification === 'not-configured' && (edited || editPossible)
+
 const summary = {}
 for (const group of GROUPS) summary[group] = []
 for (const change of allChanges) {
@@ -1110,5 +1105,6 @@ return {
   // was already failing.
   checkBaselineFailing: baselineFailures.length > 0 || baselineFailing,
   prune,
+  reportFlags: { fullPrune, edited, editPossible, unverified, noCheck },
   summary,
 }

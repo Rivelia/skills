@@ -283,7 +283,7 @@ ${own}
 All dimensions in this review (other finders own the others; stay on yours, but report a defect you can only see from your files even when its root lies in a file another dimension owns, and say so):
 ${DIMENSION_LIST}
 
-Method: ${input.scope === 'codebase' ? 'read every file you own in full' : 'read every hunk of every file you own (untracked files whole)'}, then the surrounding current code and whatever callers or callees you need to be sure. Where a claim can be tested cheaply (a regex, a library contract, a runtime behaviour), test it with a small script in /tmp, by reading the library sources in node_modules or the equivalent, or by running an existing test. Each finding goes to two adversarial skeptics that refute by default when uncertain, so a finding you have not verified is wasted: prefer fewer, verified findings over many speculative ones.
+Method: ${input.scope === 'codebase' ? 'read every file you own in full' : 'read every hunk of every file you own (untracked files whole)'}, then the surrounding current code and whatever callers or callees you need to be sure. Where a claim can be tested cheaply (a regex, a library contract, a runtime behaviour), test it with a small script in /tmp, by reading the library sources in node_modules or the equivalent, or by running an existing test. Report only what you verified: fewer, verified findings are worth more than many speculative ones.
 
 Rules:
 - Report real defects: wrong behaviour, security or tenancy gaps, races, leaks, data loss, regressions, contradictions between code and docs or copy, dead code, stale terminology (a term the project's domain or agent docs mark as avoided, deprecated or replaced, wherever it appears), and violations of rules you can quote from the project's agent docs.
@@ -299,8 +299,8 @@ Rules:
 
 function dedupPrompt(f, dim, candidates) {
   const list = candidates.map((c) => `- id ${c.id}: "${c.title}" at ${c.file}:${c.line}\n  ${c.description}`).join('\n')
-  return `You are the DEDUP check of a code review. A new finding just arrived from finder "${dim}". Compare it with every registered finding below and say whether it is the SAME DEFECT as one of them.
-Definition: two findings are the same defect when one change at one location fixes both. Findings that are merely related, in the same file, or share a theme are NOT the same defect. When in doubt, answer null (not a duplicate).
+  return `You are the DEDUP check of a code review. A new finding just arrived from finder "${dim}". Compare it with every registered finding below and say whether it is the same defect as one of them.
+Definition: two findings are the same defect when one change at one location fixes both. Findings that are merely related, in the same file, or share a theme are not the same defect. When in doubt, answer null (not a duplicate).
 
 New finding:
 Title: ${f.title}
@@ -327,14 +327,14 @@ You are the MATERIALITY skeptic in an adversarial code review. Your job is to at
 ${findingText(e)}
 
 Your verdict is four-way:
-- refute: the finding's substance fails. Valid grounds ONLY:
+- refute: the finding's substance fails. Valid grounds, and no others:
   - cosmetic-only consequence${preExisting};
   - a documented tradeoff that covers this specific regression (an ADR or doc accepting a related fallback does not excuse a new gap in a component that does implement the mechanism);
   - a removal the author's intent states, as a named item or as the general rule the commit applies, when the finding names no surviving code path, user or doc that depends on the deleted thing; a commit made by an earlier round of this review shows none of the author's decisions;
   - a deleted prompt or tool-description instruction that restates behaviour a current model shows unprompted (working autonomously, batching calls, summarising, retrying a weak search, asking specific questions); the loss is real only for a contract the model cannot infer (a format, a limit, a fact about the environment, what the tool accepts or returns);
   - a deleted test that could not fail on a plausible regression: one that recomputes the implementation's formula from the same constants, or asserts what a stub or hand-written mock returns.
   A change lying outside its commit's stated scope is not a ground to confirm; judge it by what it breaks.
-- downgrade: the mechanism is real but the impact is overstated. Severity inflation alone is NEVER a kill ground: downgrade and confirm. Say the severity you settle on. A downgrade because the path is rare, the configuration unlikely or the input unusual quotes the config, seed data, docs or callers that show it; without that evidence, keep the finding's severity.
+- downgrade: the mechanism is real but the impact is overstated. Severity inflation alone is not a kill ground: downgrade and confirm. Say the severity you settle on. A downgrade because the path is rare, the configuration unlikely or the input unusual quotes the config, seed data, docs or callers that show it; without that evidence, keep the finding's severity.
 - upgrade: the mechanism is as described and its consequence sits in a higher tier of the severity scale than the finding claims. Quote the code, config or callers that place it there, and say the severity you settle on.
 - confirm: the finding is material at its stated severity.
 
@@ -358,7 +358,7 @@ Verify it yourself: read the code at the location and along the path the finding
 
 Your verdict is three-way:
 - refute: the mechanism does not exist, or the code already handles it, or the trigger cannot occur. Uncertainty about whether the mechanism is real at all defaults to refute.
-- confirm_corrected: a detail in the finding is wrong (bad arithmetic, misattributed cause, overstated scenario) but YOUR OWN verification shows the underlying defect is real in a corrected form at the same location. Give the corrected description; the implementer will work from it. A correction must be something you actually verified, not a charitable reinterpretation. Set consequenceChanged=true if the correction changes what the defect causes (not just its mechanics).
+- confirm_corrected: a detail in the finding is wrong (bad arithmetic, misattributed cause, overstated scenario) but your own verification shows the underlying defect is real in a corrected form at the same location. Give the corrected description; the implementer will work from it. A correction must be something you actually verified, not a charitable reinterpretation. Set consequenceChanged=true if the correction changes what the defect causes (not just its mechanics).
 - confirm_as_is: the finding is right as written.
 
 A wrong detail is only a kill ground when the failure mechanism collapses with it. Quote the code your verdict rests on.`
@@ -369,7 +369,7 @@ function clusterPrompt(confirmed) {
 
 ${READ_ONLY}
 
-You are the ROOT-CAUSE CLUSTERING agent. Group the confirmed findings below by root cause and name a lead finding per cluster. Findings in different files belong to one cluster when a SINGLE change fixes them all (a cap change and the viewers it silently truncates; a missing predicate and the endpoints that rely on it). Findings that merely share a file, a theme or a subsystem are separate clusters. When unsure, keep them separate: one implementer handles a whole cluster, and a wrong merge makes it fix things the lead finding does not name.
+You are the ROOT-CAUSE CLUSTERING agent. Group the confirmed findings below by root cause and name a lead finding per cluster. Findings in different files belong to one cluster when a single change fixes them all (a cap change and the viewers it silently truncates; a missing predicate and the endpoints that rely on it). Findings that merely share a file, a theme or a subsystem are separate clusters. When unsure, keep them separate: one implementer handles a whole cluster, and a wrong merge makes it fix things the lead finding does not name.
 
 The lead of a cluster is the finding whose location is where the single change goes, preferring the highest severity when several qualify.
 
@@ -426,7 +426,7 @@ ${findingText(e)}
 ${sibText}
 ${priorFixesText()}
 
-Plan your own fix: read the code around the finding, decide the SMALLEST change that closes it, then check that change against the budget for severity ${sev}:
+Plan your own fix: read the code around the finding, decide the smallest change that closes it, then check that change against the budget for severity ${sev}:
 ${BUDGET[sev] ?? BUDGET.medium}
 ${EXCLUDED}
 ${CHANGE_KINDS_TEXT}
