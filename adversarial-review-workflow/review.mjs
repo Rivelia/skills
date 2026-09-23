@@ -55,7 +55,7 @@ const INTENT = typeof input.intent === 'string' && input.intent.trim() ? input.i
 // The implementers inherit the session model unless the user picked another; effort stays tied to severity.
 const IMPLEMENTER_MODEL = input.implementerModel ? input.implementerModel.trim() : null
 
-const FINDER_OPTS = { model: 'opus', effort: 'high' }
+const FINDER_OPTS = { model: 'opus', effort: 'medium' }
 const DEDUP_OPTS = { model: 'sonnet', effort: 'low' }
 const MATERIALITY_OPTS = { model: 'opus', effort: 'medium' }
 const TECHNICAL_OPTS = { model: 'opus', effort: 'high' }
