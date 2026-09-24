@@ -62,6 +62,20 @@ if (!Array.isArray(input.pruneExts) || input.pruneExts.length === 0) {
   throw new Error('pruneExts: string[] is required, the extensions the candidate lists were filtered on, e.g. [".ts", ".js", ".svelte"]')
 }
 if (!input.root) throw new Error('root: absolute project root path is required')
+
+// Agents start in the session's directory, which is not the root when the run
+// targets a worktree; a prompt without the root sends them to the wrong tree.
+const shellQuote = s => `'${s.replace(/'/g, `'\\''`)}'`
+const QUOTED_ROOT = shellQuote(input.root)
+const REPO = `Repository (the project root): ${input.root}. Run every command from there (\`cd ${QUOTED_ROOT}\` first, or \`git -C ${QUOTED_ROOT}\`); every relative path is relative to it.`
+
+// A literal command runs in a subshell after the cd, so an `a || b` inside it
+// cannot run b elsewhere when the cd fails, and a trailing comment cannot
+// swallow the closing parenthesis.
+function rootedCmd(cmd) {
+  return `cd ${QUOTED_ROOT} && (\n${cmd}\n)`
+}
+
 // A narrower override than [model effort]: it sets the appliers' model only,
 // which otherwise inherits the session model, and leaves every other agent
 // alone. The full override wins when both are given.
@@ -275,9 +289,11 @@ function touchedBlock(files) {
 }
 
 function hashAgentPrompt(cmd) {
-  return `Run exactly this shell command via Bash, unmodified, from the project root:
+  return `${REPO}
 
-${cmd}
+Run exactly this shell command via Bash, unmodified:
+
+${rootedCmd(cmd)}
 
 Return the 64-character hex hash it prints (the first field of its output) as \`hash\`. Do not read, review, or edit any project files.`
 }
@@ -320,9 +336,11 @@ async function discoverUntracked() {
   // the dead-agent path rather than discarding the run's whole report.
   try {
     result = await agent(
-      `Run exactly this shell command via Bash, unmodified, from the project root:
+      `${REPO}
 
-git -c core.quotePath=false ls-files -o --exclude-standard
+Run exactly this shell command via Bash, unmodified:
+
+${rootedCmd('git -c core.quotePath=false ls-files -o --exclude-standard')}
 
 Return every path it prints, verbatim, as \`untracked\`, relative to the project root with no leading './'. Returning an empty array is a normal outcome. Do not read, review, or edit any project files.`,
       { label: 'discover:untracked', phase: 'Discover', schema: UNTRACKED_SCHEMA, model: 'sonnet', effort: 'low' },
@@ -345,9 +363,11 @@ async function runCheck(label) {
   // run either, so it degrades to the same null the callers already handle.
   try {
     const result = await agent(
-      `Run exactly this shell command via Bash, unmodified, from the project root:
+      `${REPO}
 
-${input.checkCmd}
+Run exactly this shell command via Bash, unmodified:
+
+${rootedCmd(input.checkCmd)}
 
 Report whether it passed. For every failure it reports (type error, test failure, lint error), return the implicated file path and a concise one-line message. The path must be relative to the project root, with no leading './' and never absolute. Do not edit any project files and do not attempt any fixes.`,
       { label, phase: 'Verify', schema: CHECK_SCHEMA, ...checkOpts },
@@ -441,9 +461,11 @@ async function runFix(label, touched, cause, carried = []) {
   // null a dead fix-up returns rather than discarding the run's whole report.
   try {
     return await agent(
-      `Run exactly this shell command via Bash from the project root:
+      `${REPO}
 
-${input.checkCmd}
+Run exactly this shell command via Bash:
+
+${rootedCmd(input.checkCmd)}
 
 An automated ${cause} run has just edited this project${touchedNote}. If the command passes, report passed=true with empty \`fixed\` and \`remaining\`. If it fails, fix the failures the run caused${traceNote}, then re-run the command, repeating until it passes or you have made three rounds of fixes. Keep every fix minimal and behavior-preserving; do not refactor or simplify beyond what the repair requires.${baselineNote}${carriedNote}${touchedSection}
 
@@ -531,14 +553,16 @@ function finderPrompt(batch, isSweep) {
   const focus = `${FOCUS[input.scope]} Examine ONLY these files:\n${fileListBlock(batch.files)}${batchScopeNote(batch.files)}\n\nYou may read any other project files for context. Other agents are working on other parts of this project concurrently, so do not run project-wide commands (typecheck, build, lint, test suite).`
   const visitNote = batch.visits > 0 ? `\n\nThis is visit ${batch.visits + 1} to these files; previous rounds already simplified them.` : ''
   // Function replacement: focus embeds paths, so $-patterns must not be interpreted.
-  return SIMPLIFY.replace('$ARGUMENTS', () => focus) + (isSweep ? FIND_SWEEP_NOTE : visitNote)
+  return `${REPO}\n\n` + SIMPLIFY.replace('$ARGUMENTS', () => focus) + (isSweep ? FIND_SWEEP_NOTE : visitNote)
 }
 
 function judgePrompt(findings, isSweep) {
   const sweepNote = isSweep
     ? `\n\nContext: these proposals come from a confirmation sweep. Earlier rounds already refined this scope and every batch had settled, and an approval reopens it for another round. Judge each proposal on the same standard as any other. The sweep exists to catch what earlier rounds genuinely missed, not to relitigate choices they already made.`
     : ''
-  return `You are the independent gatekeeper in an automated code-simplification loop. A finder agent proposed the simplifications below. For each one, read the current code it targets and decide whether applying it would genuinely improve the codebase.
+  return `${REPO}
+
+You are the independent gatekeeper in an automated code-simplification loop. A finder agent proposed the simplifications below. For each one, read the current code it targets and decide whether applying it would genuinely improve the codebase.
 
 Proposals (JSON, judge each by its array index, starting at 0):
 ${JSON.stringify(findings, null, 2)}
@@ -556,7 +580,9 @@ Do not edit any files. Other agents are working elsewhere in this project concur
 }
 
 function applyPrompt(approved) {
-  return `Implement the following code-simplification findings exactly as described. Each was proposed by a finder agent and validated by an independent judge; your job is faithful application, not invention. Make no improvements beyond these findings.
+  return `${REPO}
+
+Implement the following code-simplification findings exactly as described. Each was proposed by a finder agent and validated by an independent judge; your job is faithful application, not invention. Make no improvements beyond these findings.
 
 Findings (JSON):
 ${JSON.stringify(approved, null, 2)}
@@ -892,7 +918,9 @@ if (stopReason === 'converged') {
       activeBatches,
       (batch) =>
         agent(
-          `You are auditing comments in the repo at ${input.root}.
+          `${REPO}
+
+You are auditing comments in this repository.
 
 For each of these files: ${batch.instruction}
 
@@ -920,7 +948,9 @@ Do NOT edit anything. Return the candidates with exact file, approximate line nu
         // may have left behind.
         pruneEdited = true
         return agent(
-          `In repo ${input.root}, remove the following comments, which were classified as non-useful (they restate code or describe stale history). Use Read + Edit. Remove only the comment (and its now-empty line); never touch code. Skip a comment only if it is valid JSDoc, or context a reader needs to correctly read or change a specific nearby line, and name that line in the reason. List every skip in "skipped" as "<comment>: <reason>". Do not skip a comment just because it is true, well written, or impossible to infer: a comment that justifies why the code does NOT do something, or defends the design against an alternative absent from the file, is change-log content and must go. Verify each edit leaves valid syntax.
+          `${REPO}
+
+Remove the following comments, which were classified as non-useful (they restate code or describe stale history). Use Read + Edit. Remove only the comment (and its now-empty line); never touch code. Skip a comment only if it is valid JSDoc, or context a reader needs to correctly read or change a specific nearby line, and name that line in the reason. List every skip in "skipped" as "<comment>: <reason>". Do not skip a comment just because it is true, well written, or impossible to infer: a comment that justifies why the code does NOT do something, or defends the design against an alternative absent from the file, is change-log content and must go. Verify each edit leaves valid syntax.
 
 Candidates (JSON):
 ${JSON.stringify(res.candidates, null, 2)}`,
