@@ -96,15 +96,10 @@ const LOG_CMD = BASE ? `${GIT} log --format='--- %H%n%B' ${BASE}..HEAD` : null
 
 // ---------- schemas ----------
 
-const STATE_SCHEMA = {
+const COPY_SCHEMA = {
   type: 'object',
-  properties: {
-    dirtyAtLaunch: { type: 'array', items: { type: 'string' } },
-    untracked: { type: 'array', items: { type: 'string' } },
-    tracked: { type: 'array', items: { type: 'string' } },
-    log: { type: 'string', description: 'The commit log output verbatim; empty when the command printed nothing.' },
-  },
-  required: ['dirtyAtLaunch', 'untracked', 'tracked', 'log'],
+  properties: { output: { type: 'string' } },
+  required: ['output'],
 }
 
 const DIMENSIONS_SCHEMA = {
@@ -151,30 +146,22 @@ function triageSchema(changeKinds) {
   }
 }
 
-const PREPARE_SCHEMA = {
-  type: 'object',
-  properties: {
-    files: { type: 'array', items: { type: 'string' } },
-    pruneFiles: { type: 'array', items: { type: 'string' } },
-    pruneUntrackedFiles: { type: 'array', items: { type: 'string' } },
-    untrackedBaseline: { type: 'array', items: { type: 'string' } },
-    baselineHash: { type: 'string', pattern: '^[0-9a-f]{64}$' },
-  },
-  required: ['files', 'pruneFiles', 'pruneUntrackedFiles', 'untrackedBaseline', 'baselineHash'],
-}
-
 // ---------- prompts ----------
 
-function statePrompt() {
-  return `Repository: ${ROOT}. Run exactly these shell commands via Bash from ${ROOT}, unmodified, and copy their output verbatim into the named fields. Every path is relative to ${ROOT} with no leading './'. An empty array is a normal answer. Do not read, review or edit any project file.
+// The status is read NUL-separated because the plain porcelain format quotes
+// any path with a space whatever core.quotePath says. The status columns are
+// stripped in the shell, and a rename or copy entry is followed by its source
+// path, so the section is a plain path list like the others.
+const STATUS_PATHS_CMD = `${GIT} status --porcelain -z | while IFS= read -r -d '' e; do echo "\${e:3}"; case "\${e:0:2}" in *R*|*C*) IFS= read -r -d '' e; echo "$e";; esac; done`
 
-1. dirtyAtLaunch: \`${GIT} status --porcelain\`. Return every path it lists as a plain path, without the two status columns and the space after them. For a rename line ("R  old -> new") return both paths.
-2. untracked: \`${GIT} ls-files -o --exclude-standard\`. Return every path.
-3. tracked: \`${LIST_TRACKED_CMD}\`. Return every path.
-4. log: ${LOG_CMD ? `\`${LOG_CMD}\`. Return the whole output verbatim, every line including the \`--- <sha>\` markers and the commit bodies; an empty string when it prints nothing.` : 'there is no base commit; return an empty string.'}`
-}
+const STATE_SECTIONS = [
+  { name: 'dirtyAtLaunch', kind: 'list', cmd: STATUS_PATHS_CMD },
+  { name: 'untracked', kind: 'list', cmd: `${GIT} ls-files -o --exclude-standard` },
+  { name: 'tracked', kind: 'list', cmd: LIST_TRACKED_CMD },
+  { name: 'log', kind: 'text', cmd: LOG_CMD || ':' },
+]
 
-// The state agent's log is a sequence of "--- <sha>" markers, each followed by
+// The state's log is a sequence of "--- <sha>" markers, each followed by
 // that commit's message.
 function parseLog(log) {
   const commits = []
@@ -258,33 +245,96 @@ A fix carries every kind its hunks contain: one that changed a comment and a que
 ${blocks}`
 }
 
-function preparePrompt() {
+function prepareSections() {
   const extRe = `\\.(${PRUNE_EXTS.map((e) => e.slice(1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`
-  const filesCmd = `{ ${LIST_TRACKED_CMD}; ${GIT} ls-files -o --exclude-standard; } | sort -u | grep -vE '${EXCLUDE}' | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done || :`
-  const pruneCmd = SCOPE === 'codebase'
-    ? `${GIT} ls-files | sort -u | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && grep -qE '(//|/\\*|<!--)' "$f" && echo "$f"; done || :`
-    : `${GIT} diff --name-only ${BASE} | sort -u | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && ${GIT} diff ${BASE} -- "$f" | grep -qE '^\\+.*(//|/\\*|<!--)' && echo "$f"; done || :`
-  const pruneUntrackedCmd = `${GIT} ls-files -o --exclude-standard | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && grep -qE '(//|/\\*|<!--)' "$f" && echo "$f"; done || :`
-  const untrackedCmd = `${GIT} ls-files -o --exclude-standard`
-  return {
-    hashCmd: hashCommand(),
-    prompt: `Repository: ${ROOT}. Run exactly these shell commands via Bash from ${ROOT}, one at a time, unmodified, in this order, and copy their output verbatim into the named fields. Every path is relative to ${ROOT} with no leading './'. An empty array is a normal answer. Do not read, review or edit any project file.
+  return [
+    { name: 'files', kind: 'list', cmd: `{ ${LIST_TRACKED_CMD}; ${GIT} ls-files -o --exclude-standard; } | sort -u | grep -vE '${EXCLUDE}' | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done || :` },
+    {
+      name: 'pruneFiles',
+      kind: 'list',
+      cmd: SCOPE === 'codebase'
+        ? `${GIT} ls-files | sort -u | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && grep -qE '(//|/\\*|<!--)' "$f" && echo "$f"; done || :`
+        : `${GIT} diff --name-only ${BASE} | sort -u | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && ${GIT} diff ${BASE} -- "$f" | grep -qE '^\\+.*(//|/\\*|<!--)' && echo "$f"; done || :`,
+    },
+    { name: 'pruneUntrackedFiles', kind: 'list', cmd: `${GIT} ls-files -o --exclude-standard | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && grep -qE '(//|/\\*|<!--)' "$f" && echo "$f"; done || :` },
+    { name: 'untrackedBaseline', kind: 'list', cmd: `${GIT} ls-files -o --exclude-standard` },
+    { name: 'baselineHash', kind: 'hash', cmd: hashCommand() },
+  ]
+}
 
-1. files:
-${filesCmd}
+// ---------- copied command output ----------
 
-2. pruneFiles:
-${pruneCmd}
+// A cheap agent sorting several outputs into several fields once returned an
+// empty pruneFiles its own command had just printed two paths for. So the
+// agent copies one block of output and the script splits it on marker lines.
+const MARKER = '::merge-ready::'
 
-3. pruneUntrackedFiles:
-${pruneUntrackedCmd}
+function copyPrompt(sections) {
+  const body = sections.map((sec) => `echo '${MARKER} ${sec.name}'\n${sec.cmd}`).join('\n')
+  return `Repository: ${ROOT}. Run exactly this shell command via Bash, unmodified, as a single call:
 
-4. untrackedBaseline (raw, every path, no filtering):
-${untrackedCmd}
+cd ${shellQuote(ROOT)} && (
+${body}
+echo '${MARKER} end'
+)
 
-5. baselineHash, run last: the 64-character hex hash, the first field of the output of
-${hashCommand()}`,
+Return its entire output verbatim as \`output\`: every line, including the \`${MARKER}\` marker lines, in order, nothing added or removed. Do not read, review or edit any project file.`
+}
+
+// Returns null when the output is not one complete run of the command: a
+// missing section or end marker, or a hash section without a hash, means lines
+// were lost.
+function parseCopy(output, sections) {
+  const raw = {}
+  let current = null
+  for (const line of String(output || '').split('\n')) {
+    const marker = new RegExp(`^\\s*${MARKER} (\\w+)\\s*$`).exec(line)
+    if (marker) {
+      current = marker[1]
+      raw[current] = []
+      continue
+    }
+    if (current) raw[current].push(line.replace(/\r$/, ''))
   }
+  if (!raw.end) return null
+  const value = {}
+  for (const sec of sections) {
+    const lines = raw[sec.name]
+    if (!lines) return null
+    if (sec.kind === 'text') {
+      value[sec.name] = lines.map((l) => l.trimEnd()).join('\n').trim()
+    } else if (sec.kind === 'hash') {
+      const hash = /^\s*([0-9a-f]{64})\b/.exec(lines.find((l) => l.trim()) || '')
+      if (!hash) return null
+      value[sec.name] = hash[1]
+    } else {
+      value[sec.name] = [...new Set(lines.map((l) => l.trim()).filter((l) => l && !l.startsWith('```')))].sort()
+    }
+  }
+  return value
+}
+
+// An output that fails to parse is retried once; the second failure ends the
+// step.
+async function runCopy(sections, label, phase, opts) {
+  const prompt = copyPrompt(sections)
+  let dead = 0
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const r = await run(prompt, { label: `${label}.${attempt}`, phase, schema: COPY_SCHEMA, ...opts })
+    if (!r) dead++
+    const value = r ? parseCopy(r.output, sections) : null
+    if (value) return { value, error: null }
+  }
+  return {
+    value: null,
+    error: dead === 2
+      ? `the ${label} agent died twice`
+      : `the ${label} agent returned an incomplete output ${dead === 0 ? 'twice' : 'once and died once'}`,
+  }
+}
+
+function shellQuote(s) {
+  return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
 function hashCommand() {
@@ -360,10 +410,10 @@ log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_RO
 
 for (let round = 1; round <= MAX_ROUNDS; round++) {
   phase('Scout')
-  const state = await run(statePrompt(), { label: `state @${round}`, phase: 'Scout', schema: STATE_SCHEMA, ...STATE_OPTS })
+  const { value: state, error: stateError } = await runCopy(STATE_SECTIONS, `state @${round}`, 'Scout', STATE_OPTS)
   if (!state) {
     stopReason = 'agent-failed'
-    stopDetail = `the state agent of round ${round} died`
+    stopDetail = `round ${round}: ${stateError}`
     break
   }
   const inScope = [...new Set([...state.tracked, ...state.untracked])]
@@ -510,14 +560,11 @@ if (stopReason !== 'converged') {
   log(`simplify skipped: the review loop ended on ${stopReason}`)
 } else {
   phase('Prepare')
-  const { prompt, hashCmd } = preparePrompt()
-  let prep = null
-  for (let attempt = 1; attempt <= 2 && !prep; attempt++) {
-    prep = await run(prompt, { label: `prepare simplify.${attempt}`, phase: 'Prepare', schema: PREPARE_SCHEMA, ...PREPARE_OPTS })
-  }
+  const hashCmd = hashCommand()
+  const { value: prep, error: prepError } = await runCopy(prepareSections(), 'prepare simplify', 'Prepare', PREPARE_OPTS)
   if (!prep) {
-    simplify = { ran: false, skipped: 'prepare-failed', error: 'the prepare agent died twice', result: null }
-    log('simplify skipped: the prepare agent died twice')
+    simplify = { ran: false, skipped: 'prepare-failed', error: prepError, result: null }
+    log(`simplify skipped: ${prepError}`)
   } else if (prep.files.length === 0) {
     simplify = { ran: false, skipped: 'nothing-to-simplify', error: null, result: null }
     log('simplify skipped: no source file in scope after the exclusions')
