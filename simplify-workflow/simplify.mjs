@@ -8,8 +8,7 @@ export const meta = {
     { title: 'Hash', detail: 'deterministic tree hash after each round', model: 'sonnet' },
     { title: 'Discover', detail: 'list untracked files the appliers did not declare', model: 'sonnet' },
     { title: 'Verify', detail: 'project check command: baseline on sonnet, then an opus fix-up agent after each editing phase', model: 'opus' },
-    { title: 'Classify', detail: 'flag comment removal candidates per file batch', model: 'opus' },
-    { title: 'Remove', detail: 'delete confirmed candidates per batch', model: 'opus' },
+    { title: 'Prune', detail: 'audit and delete non-useful comments per file batch', model: 'opus' },
   ],
 }
 
@@ -77,8 +76,8 @@ function rootedCmd(cmd) {
 }
 
 // A narrower override than [model effort]: it sets the appliers' model only,
-// which otherwise inherits the session model, and leaves every other agent
-// alone. The full override wins when both are given.
+// which otherwise inherits the session model, and leaves their medium effort
+// and every other agent alone. The full override wins when both are given.
 if (input.applyModel !== undefined && (typeof input.applyModel !== 'string' || !input.applyModel.trim())) {
   throw new Error('applyModel: a model name (e.g. opus, sonnet, haiku) when given; omit it to run the appliers on the session model')
 }
@@ -90,9 +89,9 @@ const MAX_ROUNDS = 100
 // the verify phase, which stay fixed so the gate and the repair are independent
 // of how cheap the run was asked to be.
 const override = input.model ? { model: input.model, effort: input.effort } : null
-const simplifyOpts = override ?? { model: 'opus', effort: 'high' }
-const applyOpts = override ?? (input.applyModel ? { model: input.applyModel.trim() } : {})
-const removeOpts = override ?? { model: 'opus', effort: 'medium' }
+const simplifyOpts = override ?? { model: 'opus', effort: 'medium' }
+const applyOpts = override ?? { ...(input.applyModel ? { model: input.applyModel.trim() } : {}), effort: 'medium' }
+const pruneOpts = override ?? { model: 'opus', effort: 'medium' }
 const judgeOpts = { model: 'opus', effort: 'high' }
 const checkOpts = { model: 'sonnet', effort: 'low' }
 
@@ -229,50 +228,30 @@ const FIX_SCHEMA = {
 }
 
 const SCOPE_INSTRUCTIONS = {
-  uncommitted: (base) => `First run \`git diff ${base} -- <file>\` to see the uncommitted changes, then Read the current file. Classify ONLY comments added or modified by those changes (lines inside the diff hunks, current working-tree state). Comments outside the changed hunks are out of scope.`,
-  branch: (base) => `First run \`git diff ${base} -- <file>\` to see what this branch changed, then Read the current file. Classify ONLY comments added or modified by this branch (lines inside the diff hunks, current working-tree state). Comments outside the changed hunks are out of scope.`,
-  unpushed: (base) => `First run \`git diff ${base} -- <file>\` to see the unpushed changes (unpushed commits plus uncommitted work), then Read the current file. Classify ONLY comments added or modified by those changes (lines inside the diff hunks, current working-tree state). Comments outside the changed hunks are out of scope.`,
-  codebase: () => `Read the current file. Classify EVERY comment in it.`,
+  uncommitted: (base) => `First run \`git diff ${base} -- <file>\` to see the uncommitted changes, then Read the current file. Audit ONLY comments added or modified by those changes (lines inside the diff hunks, current working-tree state). Comments outside the changed hunks are out of scope.`,
+  branch: (base) => `First run \`git diff ${base} -- <file>\` to see what this branch changed, then Read the current file. Audit ONLY comments added or modified by this branch (lines inside the diff hunks, current working-tree state). Comments outside the changed hunks are out of scope.`,
+  unpushed: (base) => `First run \`git diff ${base} -- <file>\` to see the unpushed changes (unpushed commits plus uncommitted work), then Read the current file. Audit ONLY comments added or modified by those changes (lines inside the diff hunks, current working-tree state). Comments outside the changed hunks are out of scope.`,
+  codebase: () => `Read the current file. Audit EVERY comment in it.`,
 }
 
-const RULES = `Only two kinds of comment are allowed:
-1. JSDoc comments documenting a function/type/module API.
-2. Comments adding context that cannot be inferred by reading the code (external constraints, protocol quirks, security rationale, non-obvious invariants, links to specs/bugs). Rule 2 has a second, equally mandatory half: the context must be needed to read, change or debug the code that is actually there. Apply this test to every rule-2 candidate: "which line would a reader misread, or break on their next edit, if this comment were gone?" Name that line. If you cannot name one, rule 2 does not apply and the comment is a removal candidate.
+const RULES = `A comment may stay only if it is one of:
+1. API documentation (JSDoc or docstring) on a function, type or module.
+2. A directive a tool reads: lint or type-checker suppressions, formatter pragmas, build tags, license headers.
+3. Context the code cannot show and a reader needs: an external constraint, a protocol or platform quirk, a security reason, a non-obvious invariant. Before keeping a comment under this rule, name the line a reader would misread, or break on their next edit, if the comment were gone. If no line comes to mind, rule 3 does not apply.
 
-Everything else is a removal candidate, especially:
-- Comments explaining what the code does (restating the code).
-- Comments referring to the past ("previously...", "used to...", "no longer...") or to removed code.
-- Comments justifying why the code does NOT do something, or defending the current design against an alternative that is absent from the file. These describe a decision, not the code. Present-tense phrasing does not exempt them: "X is a Y, not a Z" is change-log content whenever no Z exists in the file, however timeless it sounds. A comment can be true, well written and impossible to infer, and still be a removal candidate under this bullet; it belongs in the commit message or an ADR, not beside the result. Distrust your instinct to keep these; it is the single most common way a useless comment survives a pass.
-- Section markers / narration / change-log style comments.
+Everything else goes, in particular:
+- Restating what the code does.
+- History: how the code came to be rather than what it is. What it replaced, what it used to do, what was removed, which bug or review prompted the change. A comment that would read as pointless or confusing to someone who never saw the previous version is history, whatever its tense.
+- Decisions: why the code does not do something, or why this design won over an alternative that is not in the file. "X is a Y, not a Z" is a decision when no Z exists in the file. Such a comment can be true, well written and impossible to infer, and still belong in the commit message or an ADR rather than beside the code. This is the kind most often kept by mistake.
+- Section markers, narration, and commented-out code.
 
-Maintaining comments AND code is a burden; the sole truth should be the code itself.`
+The code is the source of truth; a comment stays only when the code cannot carry that information.`
 
-const CLASSIFY_SCHEMA = {
+const PRUNE_SCHEMA = {
   type: 'object',
-  required: ['candidates'],
-  properties: {
-    candidates: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['file', 'line', 'comment', 'reason'],
-        properties: {
-          file: { type: 'string' },
-          line: { type: 'number' },
-          comment: { type: 'string', description: 'exact comment text' },
-          reason: { type: 'string' },
-        },
-      },
-    },
-  },
-}
-
-const PRUNE_RESULT_SCHEMA = {
-  type: 'object',
-  required: ['removed', 'skipped'],
+  required: ['removed'],
   properties: {
     removed: { type: 'number' },
-    skipped: { type: 'array', items: { type: 'string' } },
   },
 }
 
@@ -868,7 +847,7 @@ if (input.checkCmd && !checkDisabled && treeMoved) {
   }
 }
 
-// Pruning starts only once simplification has converged, so classify agents
+// Pruning starts only once simplification has converged, so prune agents
 // never audit comments in code a later pass would rewrite.
 let prune
 if (stopReason === 'converged') {
@@ -888,13 +867,13 @@ if (stopReason === 'converged') {
   // a file that carried no comment then is absent from it even after an applier
   // wrote one into it, including an applier that died before reporting, which is
   // why the files it was merely dispatched against count too. A file it turned out
-  // not to touch costs one classify pass that returns nothing. Same `known` gate as
+  // not to touch costs one prune pass that removes nothing. Same `known` gate as
   // the loop: a path outside the scope is an out-of-scope edit, not a reason to
   // widen the audit.
   const editedTracked = [...new Set([...allChanges.flatMap(c => c.files ?? []), ...possiblyEditedFiles])]
     .filter(f => known.has(f) && pruneExts.has(extOf(f)) && !alreadyListed.has(f) && !filesCreatedDuringRun.includes(f))
   // A file that was already untracked at launch has no diff against the base, so
-  // a diff-bounded instruction would classify nothing in it and retire its batch
+  // a diff-bounded instruction would audit nothing in it and retire its batch
   // as clean, reporting a comment as audited that no agent was asked to read.
   const editedFresh = editedTracked.filter(f => wholeFile.has(f))
   const editedDiffBounded = editedTracked.filter(f => !wholeFile.has(f))
@@ -916,11 +895,16 @@ if (stopReason === 'converged') {
   function prunePass(iteration) {
     return pipeline(
       activeBatches,
-      (batch) =>
-        agent(
+      (batch) => {
+        // Recorded at dispatch, not from the report: an agent that edits and
+        // then dies, or whose stage throws on an exhausted budget, reports no
+        // removals, and the fix-up gate must still open for the broken syntax it
+        // may have left behind.
+        pruneEdited = true
+        return agent(
           `${REPO}
 
-You are auditing comments in this repository.
+You are pruning comments in this repository.
 
 For each of these files: ${batch.instruction}
 
@@ -929,40 +913,25 @@ ${batch.files.join('\n')}
 
 ${RULES}
 
-Do NOT edit anything. Return the candidates with exact file, approximate line number, exact comment text, and a one-line reason. Returning zero candidates is a normal, successful outcome; do not flag borderline comments to justify the pass.`,
-          { label: `classify:${iteration}.batch${batch.id}`, phase: 'Classify', schema: CLASSIFY_SCHEMA, ...simplifyOpts },
-        ).then((res) => ({ batch, res })),
-      ({ batch, res }) => {
-        // agent() resolves to null rather than throwing, so a dead or skipped
-        // classifier is indistinguishable from an empty candidate list unless
-        // the two are split here; retiring it as clean would report files
-        // as audited that no agent ever read.
-        if (!res) {
-          log(`prune: classify agent for batch ${batch.id} did not answer; its files are unaudited so far`)
-          return { batch, removed: 0, skipped: [], clean: false, dead: true }
-        }
-        if (res.candidates.length === 0) return { batch, removed: 0, skipped: [], clean: true }
-        // Recorded at dispatch, not from the report: a remover that edits and
-        // then dies, or whose stage throws on an exhausted budget, reports no
-        // removals, and the fix-up gate must still open for the broken syntax it
-        // may have left behind.
-        pruneEdited = true
-        return agent(
-          `${REPO}
-
-Remove the following comments, which were classified as non-useful (they restate code or describe stale history). Use Read + Edit. Remove only the comment (and its now-empty line); never touch code. Skip a comment only if it is valid JSDoc, or context a reader needs to correctly read or change a specific nearby line, and name that line in the reason. List every skip in "skipped" as "<comment>: <reason>". Do not skip a comment just because it is true, well written, or impossible to infer: a comment that justifies why the code does NOT do something, or defends the design against an alternative absent from the file, is change-log content and must go. Verify each edit leaves valid syntax.
-
-Candidates (JSON):
-${JSON.stringify(res.candidates, null, 2)}`,
-          { label: `remove:${iteration}.batch${batch.id}`, phase: 'Remove', schema: PRUNE_RESULT_SCHEMA, ...removeOpts },
-        ).then((r) => ({ batch, removed: r?.removed || 0, skipped: r?.skipped || [], clean: false, deadRemove: !r }))
+Remove every removal candidate with Read + Edit: remove only the comment (and its now-empty line), never touch code, and verify each edit leaves valid syntax. Report the number of comments you removed in \`removed\`. Removing nothing is a normal, successful outcome; do not remove borderline comments to justify the pass.`,
+          { label: `prune:${iteration}.batch${batch.id}`, phase: 'Prune', schema: PRUNE_SCHEMA, ...pruneOpts },
+        ).then((res) => {
+          // agent() resolves to null rather than throwing, so a dead or skipped
+          // agent is indistinguishable from one that removed nothing unless the
+          // two are split here; retiring it as clean would report files as
+          // audited that no agent ever finished.
+          if (!res) {
+            log(`prune: agent for batch ${batch.id} did not answer; its files are unaudited so far`)
+            return { batch, removed: 0, clean: false, dead: true }
+          }
+          return { batch, removed: res.removed, clean: res.removed === 0 }
+        })
       },
     )
   }
 
   const pruneSeen = new Set([lastTreeHash])
   let removed = 0
-  let skipped = []
   const unauditedFiles = []
   let batchesDone = 0
   let stable = 0
@@ -982,26 +951,22 @@ ${JSON.stringify(res.candidates, null, 2)}`,
     const attempted = activeBatches.length
     const ok = (await prunePass(pruneIterations)).filter(Boolean)
     const passRemoved = ok.reduce((n, r) => n + r.removed, 0)
-    // A batch whose classifier or remover died left candidates unactioned, and
-    // an exhausted token budget makes its stage throw, dropping the batch from
-    // `ok` entirely. Neither is a pass that found nothing left to do, so
-    // neither may confirm a still tree.
-    const incomplete = ok.length < attempted || ok.some((r) => r.dead || r.deadRemove)
+    // A batch whose agent died left its comments unaudited, and an exhausted
+    // token budget makes its stage throw, dropping the batch from `ok`
+    // entirely. Neither is a pass that found nothing left to do, so neither
+    // may confirm a still tree.
+    const incomplete = ok.length < attempted || ok.some((r) => r.dead)
     // The retry allowance below bounds a failure that keeps repeating, not the
     // phase's lifetime: a pass in which every agent answered proves the earlier
     // death was transient, so the phase must not end on the next isolated one.
     if (!incomplete) incompleteRetries = 0
-    // A skip never moves the tree, so accumulating skips only on the branch
-    // where the hash moved would lose every skip reason from the pass that ends
-    // the loop, usually the pass whose agents defended everything they saw.
-    skipped.push(...ok.flatMap((r) => r.skipped))
 
-    // A batch whose classifier keeps dying gets fresh attempts, but only a
-    // bounded number: a user who skips the same agent every pass would
-    // otherwise keep the loop alive until the round backstop. Only back-to-back
-    // deaths mean a batch is unreachable, so a classifier that answered clears
-    // the tally; without the reset, two flakes passes apart would drop a batch
-    // that has been classified and pruned in between.
+    // A batch whose agent keeps dying gets fresh attempts, but only a bounded
+    // number: a user who skips the same agent every pass would otherwise keep
+    // the loop alive until the round backstop. Only back-to-back deaths mean a
+    // batch is unreachable, so an agent that answered clears the tally; without
+    // the reset, two flakes passes apart would drop a batch that has been
+    // pruned in between.
     const abandonedIds = new Set()
     for (const r of ok) {
       if (!r.dead) {
@@ -1012,11 +977,11 @@ ${JSON.stringify(res.candidates, null, 2)}`,
       if (r.batch.deadAttempts >= 2) {
         abandonedIds.add(r.batch.id)
         unauditedFiles.push(...r.batch.files)
-        log(`prune: batch ${r.batch.id} abandoned after ${r.batch.deadAttempts} consecutive classify agents died; it never produced a clean pass, so its comments may not be fully audited`)
+        log(`prune: batch ${r.batch.id} abandoned after ${r.batch.deadAttempts} consecutive prune agents died; it never produced a clean pass, so its comments may not be fully audited`)
       }
     }
 
-    // Re-classifying a settled batch every pass invites agents to justify the
+    // Re-auditing a settled batch every pass invites agents to justify the
     // visit by flagging borderline comments, so the tree keeps changing and
     // the hash never repeats.
     const cleanIds = new Set(ok.filter((r) => r.clean).map((r) => r.batch.id))
@@ -1026,16 +991,16 @@ ${JSON.stringify(res.candidates, null, 2)}`,
     const hash = await runHash(input.hashCmd, `hash:prune@${pruneIterations}`)
     if (!hash) {
       pruneStop = 'hash-unavailable'
-      // Same reason as the skips above: the removals of the pass that ends the
-      // loop are real, and counting them only where the hash moved would report
-      // an edited tree as one nothing was removed from.
+      // The removals of the pass that ends the loop are real, and counting them
+      // only where the hash moved would report an edited tree as one nothing
+      // was removed from.
       removed += passRemoved
       log(`prune ${pruneIterations}: hash agent could not return a hash, so a settled tree cannot be confirmed; stopping and reporting the work done so far`)
       break
     }
     if (pruneSeen.has(hash)) {
       // One more attempt for the batches an agent left unfinished, then out: a
-      // failure that keeps repeating, like a user skipping every remove agent
+      // failure that keeps repeating, like a user skipping every prune agent
       // or an exhausted budget, would otherwise re-run it until the round backstop.
       if (incomplete && activeBatches.length && incompleteRetries < 1) {
         incompleteRetries++
@@ -1065,11 +1030,11 @@ ${JSON.stringify(res.candidates, null, 2)}`,
     }
   }
 
-  // Removal agents edit in parallel and never run project-wide commands, so
+  // Prune agents edit in parallel and never run project-wide commands, so
   // one fix-up on the settled tree is the safety net for broken syntax. Every
-  // remover is awaited before its pass's hash, so a phase that never left the
+  // agent is awaited before its pass's hash, so a phase that never left the
   // seed state proves nothing moved; only a phase that ended with no hash at
-  // all has to fall back on a remover having been dispatched.
+  // all has to fall back on an agent having been dispatched.
   if (input.checkCmd && !checkDisabled && (pruneSeen.size > 1 || (pruneEdited && pruneStop === 'hash-unavailable'))) {
     // This fix-up runs last on the final tree, so it adjudicates what the
     // simplify fix-up left broken too; otherwise its verdict would replace a
@@ -1088,11 +1053,10 @@ ${JSON.stringify(res.candidates, null, 2)}`,
     }
   }
 
-  // A batch re-classified across passes can report the same skip more than once.
-  // A remover that edits and then dies reports no removal, so `removed` alone
+  // A prune agent that edits and then dies reports no removal, so `removed` alone
   // cannot say the tree moved; the pass hashes can, though a pre-fix seed
   // leaves the first of them counting the simplify fix-up's edits.
-  prune = { iterations: pruneIterations, stopReason: pruneStop, distinctTreeStates: pruneSeen.size - 1, removed, skipped: [...new Set(skipped)], batchesDone, batchesTotal, unauditedFiles, verificationStatus: pruneVerification }
+  prune = { iterations: pruneIterations, stopReason: pruneStop, distinctTreeStates: pruneSeen.size - 1, removed, batchesDone, batchesTotal, unauditedFiles, verificationStatus: pruneVerification }
 } else {
   prune = { stopReason: 'skipped-simplify-unstable' }
 }

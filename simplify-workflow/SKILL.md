@@ -12,7 +12,7 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
 1. **Resolve the arguments.** Parse them in this exact order; every "ask the user" below means ask and stop, without launching anything.
    - The first argument is the scope and must be exactly one of `uncommitted`, `branch`, `unpushed`, `codebase`; if it is missing or anything else, ask the user which scope to use.
    - After the scope, what remains must be nothing, `[model]`, or `[model] [effort]`, in that order and nothing else.
-   - The model must be a plausible model name (e.g. `opus`, `sonnet`, `haiku`). If the token after the scope is not a model name, ask the user what they meant. An effort is one of `low`, `medium`, `high`, `xhigh`, `max`. If a model is given without a following effort, ask the user which effort to use; the model/effort pairing is the user's call, never defaulted. The override drives the find, apply, classify and remove agents; the judge and the verify agents keep the fixed models set in [simplify.mjs](simplify.mjs).
+   - The model must be a plausible model name (e.g. `opus`, `sonnet`, `haiku`). If the token after the scope is not a model name, ask the user what they meant. An effort is one of `low`, `medium`, `high`, `xhigh`, `max`. If a model is given without a following effort, ask the user which effort to use; the model/effort pairing is the user's call, never defaulted. The override drives the find, apply and prune agents; the judge and the verify agents keep the fixed models set in [simplify.mjs](simplify.mjs).
    - Any further leftover argument: ask the user what it means.
 
 2. **Build the hash command** for the scope. This exact string is the single source of truth for change detection: you run it once for the baseline, and the workflow reruns it verbatim as the convergence gate every iteration.
@@ -53,7 +53,7 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
 
 4. **Resolve the base ref** bounding the diff: `HEAD` for `uncommitted`, the step-2 merge-base for `branch` and `unpushed` (each its own), none for `codebase`. It is required for every non-`codebase` scope.
 
-   **Build the prune candidate lists**, holding only code files that can contain comments (e.g. `.ts`, `.svelte`, `.js`). Neither list may ever name a path step 3's exclusions would have dropped for this scope: a vendored, generated, built or minified file the workflow was told not to simplify must not be reachable by a remove agent either. The workflow classifies tracked candidates diff-bounded and untracked ones whole-file, hence two lists:
+   **Build the prune candidate lists**, holding only code files that can contain comments (e.g. `.ts`, `.svelte`, `.js`). Neither list may ever name a path step 3's exclusions would have dropped for this scope: a vendored, generated, built or minified file the workflow was told not to simplify must not be reachable by a prune agent either. The workflow audits tracked candidates diff-bounded and untracked ones whole-file, hence two lists:
    - `pruneFiles`, the tracked candidates:
      - `uncommitted` / `branch` / `unpushed`: files changed vs the base whose diff adds a comment, e.g.
 
@@ -75,7 +75,7 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
        | while IFS= read -r f; do [ -f "$f" ] && grep -qE '(//|/\*|<!--)' "$f" && echo "$f"; done || :
      ```
 
-   An empty list is still passed, as `[]`; even with both lists empty, the workflow classifies the comments the simplify phase itself introduces.
+   An empty list is still passed, as `[]`; even with both lists empty, the workflow audits the comments the simplify phase itself introduces.
 
    Also pass `pruneExts`, the extensions you filtered these lists on, e.g. `[".ts", ".js", ".svelte"]`. It is the set of comment-carrying source extensions for this repo, not narrowed to the extensions that happen to occur in the lists; the workflow judges files that appear mid-run by it.
 
@@ -94,26 +94,26 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
    })
    ```
 
-   Pass `files`, `untrackedBaseline`, `pruneFiles`, `pruneUntrackedFiles`, and `pruneExts` as real JSON arrays, not JSON-encoded strings. Every array is required: pass `[]` when the working tree has no untracked files or a prune list has no candidates. The script also accepts an optional `applyModel`, a model for the appliers only, which otherwise inherit the session's model; the merge-ready workflow passes it, this skill never does.
+   Pass `files`, `untrackedBaseline`, `pruneFiles`, `pruneUntrackedFiles`, and `pruneExts` as real JSON arrays, not JSON-encoded strings. Every array is required: pass `[]` when the working tree has no untracked files or a prune list has no candidates. The script also accepts an optional `applyModel`, a model for the appliers only, which otherwise inherit the session's model; the appliers run at medium effort either way; the merge-ready workflow passes it, this skill never does.
 
    The workflow returns `{scope, iterations, sweeps, stopReason, distinctTreeStates, findingsProposed, findingsApproved, rejectedFindings, changesApplied, undeclaredFiles, unanalyzedFiles, abandonedAfterProgress, discoveryFailed, unresolvedCheckFailures, verificationStatus, checkBaselineFailing, prune, reportFlags, summary}`. Step 8 defines how to read and report every field; semantics beyond what it states live in [simplify.mjs](simplify.mjs).
 
 8. **Report.** Relay `summary` grouped under its three headings (`Performance improvements`, `Code simplifications`, `Bug fixes`), plus the round count (`iterations`), the sweep count (`sweeps`), and the proposed/approved/applied counts (`findingsProposed`, `findingsApproved`, `changesApplied`); the gap between proposed and approved is the judge doing its job. Relay every entry in `rejectedFindings` under its own heading, with its description, its files, and the judge's reason, so the user sees what the judges struck and why. Leave the changes uncommitted. Then obey every row of the table below whose condition holds; a row may impose an action or a prohibition, not only a line of report. The script computes the recurring conditions in `reportFlags`:
 
    - **Full prune object** is `reportFlags.fullPrune`: `prune` is anything but `{stopReason: "skipped-simplify-unstable"}`. Otherwise no other `prune` field exists, so no row that names one applies.
-   - **Edited** is `reportFlags.edited`: an applier or remover changed something, proven by a reported change or by the tree hash moving even when no agent lived to report it.
-   - **Edit possible** is `reportFlags.editPossible`: a phase lost track of the tree hash, so an applier or remover may have written before it did.
+   - **Edited** is `reportFlags.edited`: an applier or prune agent changed something, proven by a reported change or by the tree hash moving even when no agent lived to report it.
+   - **Edit possible** is `reportFlags.editPossible`: a phase lost track of the tree hash, so an applier or prune agent may have written before it did.
    - **[UNVERIFIED]** is `reportFlags.unverified` and **[NO CHECK]** is `reportFlags.noCheck`.
 
    | When | Report |
    | --- | --- |
    | `prune.stopReason` is `skipped-simplify-unstable` | State that pruning was skipped because simplification never converged, naming the top-level `stopReason` as what it stopped on. No other row naming a `prune` field applies. |
-   | `prune` is a full prune object | Report `prune.removed`, every `prune.skipped` entry with its reason, `prune.batchesDone`/`prune.batchesTotal`, and `prune.iterations`. |
+   | `prune` is a full prune object | Report `prune.removed`, `prune.batchesDone`/`prune.batchesTotal`, and `prune.iterations`. |
    | `unanalyzedFiles` is non-empty | List those paths and say they were never analysed because their batch's agents kept dying or were skipped, so the rest of the scope could still converge; drop that last clause when `stopReason` is `all-batches-abandoned`, where there is no rest. |
    | `undeclaredFiles` is non-empty | List those paths and say they were never simplified. An apply agent created them without reporting them, so they missed the simplify loop. |
    | `discoveryFailed` is true | Say, in place of the `undeclaredFiles` line, that the workflow could not list the files created during the run, so any undeclared ones were neither pruned nor verified. |
    | `abandonedAfterProgress` is non-empty | List those paths and say their batch was dropped after repeated agent deaths, so the loop never confirmed they had settled; whatever the stop reason, make no claim that the whole scope converged. |
-   | Full prune object and `prune.unauditedFiles` is non-empty | List those paths and say their comments may not be fully audited, whatever the stop reason says. The classify agents for their batch died or were skipped, so it never produced a clean pass; never say the comments were fully audited. |
+   | Full prune object and `prune.unauditedFiles` is non-empty | List those paths and say their comments may not be fully audited, whatever the stop reason says. The prune agents for their batch died or were skipped, so it never produced a clean pass; never say the comments were fully audited. |
    | `unresolvedCheckFailures` is non-empty | Before reporting, fix any breakage yourself in files the workflow touched; then list what still remains, prominently, saying the workflow's own fix-up agent already tried and failed to repair these. An entry whose `file` is `(unattributed)` names no path, because the fix-up reported the check still failing without naming any failure; treat it as a failure with no known location and open no file for it. |
    | **[UNVERIFIED]** | State prominently that the project was never verified and that the user should run the check command manually; when `unresolvedCheckFailures` is empty, say that its emptiness proves nothing. |
    | **[UNVERIFIED]** and **edited** | Add that the project was edited without verification. |
@@ -132,7 +132,7 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
    | **[UNSETTLED]** and the triggering phase recorded a change: `changesApplied` or `distinctTreeStates` non-zero at top level, `prune.removed` or `prune.distinctTreeStates` non-zero for prune | Say the tree was edited. |
    | **[UNSETTLED]** via `max-iterations` and the triggering phase recorded no change: `changesApplied` and `distinctTreeStates` both zero at top level, `prune.removed` and `prune.distinctTreeStates` both zero for prune | Say that nothing was recorded as changed and that the final state could not be confirmed. |
    | **[UNSETTLED]** via `hash-unavailable` and the triggering phase recorded no change, the same counters both zero | Say that nothing was recorded as changed, that an edit could not be ruled out, and that the final state could not be confirmed. |
-   | Full prune object whose `stopReason` is `incomplete-dead-agent` | State that pruning stopped with `prune.batchesTotal - prune.batchesDone` batches unfinished because its agents kept dying; make no claim about confirmed removal candidates; the deaths may have been classify agents, in which case those batches' comments were never classified at all. |
+   | Full prune object whose `stopReason` is `incomplete-dead-agent` | State that pruning stopped with `prune.batchesTotal - prune.batchesDone` batches unfinished because its agents kept dying; make no claim that those batches' comments were audited. |
    | Full prune object whose `stopReason` is `all-batches-clean` | Report it as the expected healthy outcome, every batch audited until it produced no further candidates, and add no caveat of your own. |
    | Full prune object whose `stopReason` is `converged` | Say the tree stopped moving while batches were still active, so the remaining `prune.batchesTotal - prune.batchesDone` batches never produced a clean pass. |
 
