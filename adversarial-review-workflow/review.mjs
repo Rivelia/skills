@@ -1,6 +1,6 @@
 export const meta = {
   name: 'adversarial-review',
-  description: 'Adversarial code review over a scope: finders per dimension, dedup at intake, two skeptics per finding, root-cause clustering, budgeted implementers that commit their own fix',
+  description: 'Adversarial code review over a scope: finders per dimension, dedup at intake, two skeptics per finding, root-cause clustering, implementers that commit their own fix',
   phases: [
     { title: 'Find', detail: 'one Opus finder per dimension', model: 'opus' },
     { title: 'Dedup', detail: 'Sonnet intake check against the registered findings', model: 'sonnet' },
@@ -98,13 +98,6 @@ const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit
 
 const DIMENSION_LIST = DIMENSIONS.map((d) => `- ${d.key}: ${d.title}. Files: ${d.files.join(', ')}`).join('\n')
 
-const BUDGET = {
-  low: 'LOW budget: a change with no behaviour change, across the files the finding names: copy, comments, docs, a rename, dead-code removal, or a small robustness hunk. No new test file.',
-  medium: 'MEDIUM budget: a contained code change in the files the finding names, plus one focused test.',
-  high: 'HIGH budget: a contained change of roughly under 60 lines across a few files whose behaviour is easy to reason about and to test.',
-  critical: 'CRITICAL budget: a contained change of roughly under 60 lines across a few files whose behaviour is easy to reason about and to test.',
-}
-
 // One vocabulary for what a fix is made of. The implementer reports its fix in
 // these kinds, and the merge-ready triage judges a fix in the same ones, reading
 // the table from this script's result. `production` marks the kinds that change
@@ -128,21 +121,18 @@ const CHANGE_KEYS = Object.keys(CHANGE_KINDS)
 const CHANGE_KINDS_TEXT = `Report the kinds of change in your fix from this list, by key, every kind the hunks contain:\n${CHANGE_KEYS.map((k) => `- ${k}: ${CHANGE_KINDS[k].text}`).join('\n')}`
 
 // The kinds of fix never auto-applied, each with the key the implementer
-// reports when it refuses one.
+// reports when it refuses one. These are the only grounds for refusing a fix.
 const EXCLUSIONS = {
-  'new-infra': 'a new CI job, script, config file or infrastructure',
-  abstraction: 'a new symbol another file imports',
-  'public-api': 'an export or public signature changed, beyond dropping an export or renaming a symbol whose every consumer is in the files the finding names',
+  'design-decision': 'a fix that needs a behaviour or product choice the code, the finding and the author\'s intent do not settle',
+  'low-behaviour-change': 'a user-visible behaviour change for a low-severity finding',
+  'new-infra': 'a new CI job or new infrastructure',
+  'public-api': 'an export or public signature changed with a consumer outside this repo, or a consumer the fix cannot update',
   schema: 'the DB schema, a new migration, or a migration present at the base commit (every migration in a codebase review)',
   dependency: 'a dependency change',
-  'unnamed-file': 'a file neither the finding nor the clustering named',
-  'bug-asserting-test': 'a test asserting a still-present bug',
-  'source-reading-test': 'a test reading source as text',
-  'missing-test-only': 'a finding whose only defect is a missing test',
-  'warning-in-prose': 'a defect in code warned about in a comment, doc or tool description; the fix is the code change',
+  'unnamed-file': 'a file you may not touch: you may touch the files the finding or the clustering named, the tests covering them, and the direct callers of the code you change',
 }
 const EXCLUSION_KEYS = Object.keys(EXCLUSIONS)
-const EXCLUDED = `Never auto-applied, whatever the severity; report the key as excludedKind:\n${EXCLUSION_KEYS.map((k) => `- ${k}: ${EXCLUSIONS[k]}`).join('\n')}`
+const EXCLUDED = `Never auto-applied; report the key as excludedKind:\n${EXCLUSION_KEYS.map((k) => `- ${k}: ${EXCLUSIONS[k]}`).join('\n')}`
 
 function findingText(e) {
   const sev = e.finalSeverity ?? e.severity
@@ -229,10 +219,10 @@ const CLUSTER_SCHEMA = {
 const IMPL_SCHEMA = {
   type: 'object',
   properties: {
-    outcome: { type: 'string', enum: ['applied', 'covered', 'not_applied', 'reverted'], description: 'applied: a fix is in the tree (committed or not). covered: an earlier accepted fix already closes it, nothing changed. not_applied: over budget or an excluded kind, nothing changed. reverted: you applied a fix, a check could not pass within the budget, and you undid your own hunks.' },
+    outcome: { type: 'string', enum: ['applied', 'covered', 'not_applied', 'reverted'], description: 'applied: a fix is in the tree (committed or not). covered: an earlier accepted fix already closes it, nothing changed. not_applied: an excluded kind, nothing changed. reverted: you applied a fix, a check could not pass without going beyond the finding, and you undid your own hunks.' },
     plan: { type: 'string', description: 'The smallest fix you identified, in enough detail for a maintainer to apply it by hand.' },
-    reason: { type: 'string', description: 'Why you did or did not apply it: fits budget / over budget (which budget line) / excluded kind (which) / covered / which check could not pass.' },
-    excludedKind: { type: ['string', 'null'], enum: [...EXCLUSION_KEYS, null], description: 'For not_applied: the key of the excluded kind that applies; null when merely over budget, and for every other outcome.' },
+    reason: { type: 'string', description: 'Why you did or did not apply it: applied / excluded kind (which, and what in the fix triggers it) / covered / which check could not pass.' },
+    excludedKind: { type: ['string', 'null'], enum: [...EXCLUSION_KEYS, null], description: 'For not_applied: the key of the excluded kind that applies; null for every other outcome.' },
     coveredBy: { type: ['integer', 'null'], description: 'For covered: the id of the finding whose fix covers this one.' },
     files: { type: 'array', items: { type: 'string' }, description: 'Repo-relative paths you changed or created (empty unless outcome is applied).' },
     kinds: { type: 'array', items: { type: 'string', enum: CHANGE_KEYS }, description: 'Every kind of change in your fix, by key from the list in the prompt; empty unless outcome is applied.' },
@@ -240,7 +230,7 @@ const IMPL_SCHEMA = {
     checks: { type: 'array', items: { type: 'object', properties: { command: { type: 'string' }, result: { type: 'string' } }, required: ['command', 'result'] } },
     committed: { type: 'boolean' },
     commitSha: { type: ['string', 'null'] },
-    notes: { type: 'string', description: 'Anything left outside the budget that a more complete fix would need.' },
+    notes: { type: 'string', description: 'Anything beyond the finding that a more complete fix would need.' },
   },
   required: ['outcome', 'plan', 'reason', 'excludedKind', 'coveredBy', 'files', 'kinds', 'hunks', 'checks', 'committed', 'commitSha', 'notes'],
 }
@@ -406,7 +396,7 @@ function priorFixesText() {
 
 function checksText() {
   if (CHECKS) {
-    return `Then run the project checks relevant to what you touched:\n${CHECKS}\nFix what they flag while staying within the budget. A check you cannot make pass within the budget means you undo your own hunks (\`git checkout -- <file>\` for a file that is not protected, editing back by hand for a protected one, deleting files you created) and return outcome=reverted with the plan and the reason.`
+    return `Then run the project checks relevant to what you touched:\n${CHECKS}\nFix what they flag without going beyond the finding. A check you cannot make pass that way means you undo your own hunks (\`git checkout -- <file>\` for a file that is not protected, editing back by hand for a protected one, deleting files you created) and return outcome=reverted with the plan and the reason.`
   }
   return 'No check command is known for this project. Verify your change by reading it against its callers and by running the existing tests that cover the files you touched, if any; report what you ran in checks.'
 }
@@ -426,16 +416,15 @@ ${findingText(e)}
 ${sibText}
 ${priorFixesText()}
 
-Plan your own fix: read the code around the finding, decide the smallest change that closes it, then check that change against the budget for severity ${sev}:
-${BUDGET[sev] ?? BUDGET.medium}
+Plan your own fix: read the code around the finding, decide the smallest change that closes it (severity ${sev}), then check that change against the excluded kinds:
 ${EXCLUDED}
 ${CHANGE_KINDS_TEXT}
 
-Minimal is relative to the finding, not to any larger plan: when a more complete fix exists beyond the budget, do the part inside the budget and describe the rest in notes. Never extend a fix to a sibling component the finding did not name (that is a new finding). Cheap means small relative to the finding, not quick to type. Follow the project's agent docs for any code or test you write; a test must never add complexity to production code (no test-only parameters, seams or exports).
+Minimal is relative to the finding, not to any larger plan: when a more complete fix exists beyond the finding, close the finding and describe the rest in notes. Never extend a fix to a sibling component the finding did not name (that is a new finding). Cheap means small relative to the finding, not quick to type. Follow the project's agent docs for any code or test you write; a test must never add complexity to production code (no test-only parameters, seams or exports), never assert a still-present bug, and never read source as text. A finding whose only defect is a missing test is fixed by adding that test. When a comment, doc or tool description warns about a defect in code, fix the code, not the warning.
 
-If the smallest fix does not fit the budget or is an excluded kind, change nothing and return outcome=not_applied with the plan, the reason and, for an excluded kind, its key as excludedKind.
+Size alone is never a reason to refuse. If the smallest fix is an excluded kind, change nothing and return outcome=not_applied with the plan, the reason and its key as excludedKind.
 
-When it fits: make the change. ${checksText()}
+Otherwise: make the change. ${checksText()}
 
 Commit rule: when none of the files you changed or created is protected, commit the fix yourself: \`git add <exactly your files>\`, then \`git commit\` with a message in the project's commit convention (from the context above; default \`type(scope): subject\`), with no attribution lines or trailers; report committed=true and the sha. When any file you changed is protected, leave the whole fix uncommitted and report committed=false: never commit a whole file to get around the overlap.
 
@@ -683,7 +672,7 @@ async function implement(e, siblings) {
   }
   if (impl.outcome === 'not_applied') {
     e.outcome = 'not_fixed'
-    log(`#${e.id} not auto-fixed: ${impl.excludedKind ? `excluded kind ${impl.excludedKind}` : 'over budget'}`)
+    log(`#${e.id} not auto-fixed: excluded kind ${impl.excludedKind ?? 'unreported'}`)
     return
   }
   if (impl.outcome === 'reverted') {
