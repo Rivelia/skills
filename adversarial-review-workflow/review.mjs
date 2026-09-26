@@ -124,7 +124,6 @@ const CHANGE_KINDS_TEXT = `Report the kinds of change in your fix from this list
 // reports when it refuses one. These are the only grounds for refusing a fix.
 const EXCLUSIONS = {
   'design-decision': 'a fix that needs a behaviour or product choice the code, the finding and the author\'s intent do not settle',
-  'low-behaviour-change': 'a user-visible behaviour change for a low-severity finding',
   'new-infra': 'a new CI job or new infrastructure',
   'public-api': 'an export or public signature changed with a consumer outside this repo, or a consumer the fix cannot update',
   schema: 'the DB schema, a new migration, or a migration present at the base commit (every migration in a codebase review)',
