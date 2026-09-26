@@ -89,10 +89,19 @@ const INTENT_TEXT = INTENT
   ? `\nAuthor's intent for this diff, verbatim (commit messages, the author's note, or both). A removal the intent states is a decision, not a defect, unless it breaks something that still exists:\n<<<\n${INTENT}\n>>>`
   : ''
 
+// Rules both the finders and the materiality skeptic apply, written once so the
+// two cannot drift apart.
+const DEAD_CODE = 'dead code (an unreachable branch, an unused export, an obsolete option)'
+const STALE_TERMINOLOGY = "stale terminology (a term the project's domain or agent docs mark as avoided, deprecated or replaced, on any surface: prompts, identifiers, comments, copy, docs, tests)"
+const INCOMPLETE_FIX = "when the author's intent says the diff fixes a failure, an instance of that failure left on a code path the diff changed is an incomplete fix, not a pre-existing condition: it counts as introduced, at the severity of the failure itself, not of the false claim"
+const UNPROMPTED_BEHAVIOUR = 'working autonomously, batching calls, summarising what it retrieves, retrying a weak search, asking specific questions'
+const NON_INFERABLE_CONTRACT = 'a format, a limit, a fact about the environment, what the tool accepts or returns'
+const HOLLOW_TEST = "recomputes the implementation's formula from the same constants, or asserts what a stub or hand-written mock returns"
+
 const CONTEXT = `Repository: ${ROOT}.
 ${input.context.trim()}
 ${scopeText()}${INTENT_TEXT}
-Severity scale: critical = data loss or corruption, a security breach, or a crash of the production process; high = wrong behaviour on a path users hit in normal use, a deadlock, hang or resource leak under normal load, a cost or quality regression on every request of an affected configuration (a cache miss, dropped context), or a security or tenancy gap; medium = wrong behaviour on an edge path, a real leak or race that is hard to hit, a convention violation the project's agent docs state explicitly, or a false statement in docs or comments a maintainer would act on; low = a demonstrably false statement shipped to users (UI copy, translations, docs, error messages), a misleading comment, dead code (an unreachable branch, an unused export, an obsolete option) or stale terminology (a term the project's domain or agent docs mark as avoided, deprecated or replaced, on any surface: prompts, identifiers, comments, copy, docs), or a small robustness issue with no user-visible effect today.`
+Severity scale: critical = data loss or corruption, a security breach, or a crash of the production process; high = wrong behaviour on a path users hit in normal use, a deadlock, hang or resource leak under normal load, a cost or quality regression on every request of an affected configuration (a cache miss, dropped context), or a security or tenancy gap; medium = wrong behaviour on an edge path, a real leak or race that is hard to hit, a convention violation the project's agent docs state explicitly, or a false statement in docs or comments a maintainer would act on; low = a demonstrably false statement shipped to users (UI copy, translations, docs, error messages), a misleading comment, ${DEAD_CODE} or ${STALE_TERMINOLOGY}, or a small robustness issue with no user-visible effect today.`
 
 const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit, create or delete files under ${ROOT}, and run no git command that changes state (no checkout, restore, stash, commit, reset, clean). Scratch files go in /tmp. You may run existing tests and small scripts from /tmp.`
 
@@ -190,10 +199,9 @@ const TECHNICAL_SCHEMA = {
     verdict: { type: 'string', enum: ['refute', 'confirm_as_is', 'confirm_corrected'] },
     correctedTitle: { type: ['string', 'null'] },
     correctedDescription: { type: ['string', 'null'], description: 'For confirm_corrected: the defect as you actually verified it, at the same location.' },
-    consequenceChanged: { type: 'boolean', description: 'For confirm_corrected: true when the correction changes what the defect causes, not just its mechanics.' },
     reason: { type: 'string', description: 'What you verified and how (code read, commands run).' },
   },
-  required: ['verdict', 'correctedTitle', 'correctedDescription', 'consequenceChanged', 'reason'],
+  required: ['verdict', 'correctedTitle', 'correctedDescription', 'reason'],
 }
 
 const CLUSTER_SCHEMA = {
@@ -218,11 +226,10 @@ const CLUSTER_SCHEMA = {
 const IMPL_SCHEMA = {
   type: 'object',
   properties: {
-    outcome: { type: 'string', enum: ['applied', 'covered', 'not_applied', 'reverted'], description: 'applied: a fix is in the tree (committed or not). covered: an earlier accepted fix already closes it, nothing changed. not_applied: an excluded kind, nothing changed. reverted: you applied a fix, a check could not pass without going beyond the finding, and you undid your own hunks.' },
+    outcome: { type: 'string', enum: ['applied', 'covered', 'not_applied', 'reverted'], description: 'applied: a fix is in the tree (committed or not). covered: the defect can no longer occur in the current tree, nothing changed. not_applied: an excluded kind, nothing changed. reverted: you applied a fix, a check could not pass without going beyond the finding, and you undid your own hunks.' },
     plan: { type: 'string', description: 'The smallest fix you identified, in enough detail for a maintainer to apply it by hand.' },
     reason: { type: 'string', description: 'Why you did or did not apply it: applied / excluded kind (which, and what in the fix triggers it) / covered / which check could not pass.' },
     excludedKind: { type: ['string', 'null'], enum: [...EXCLUSION_KEYS, null], description: 'For not_applied: the key of the excluded kind that applies; null for every other outcome.' },
-    coveredBy: { type: ['integer', 'null'], description: 'For covered: the id of the finding whose fix covers this one.' },
     files: { type: 'array', items: { type: 'string' }, description: 'Repo-relative paths you changed or created (empty unless outcome is applied).' },
     kinds: { type: 'array', items: { type: 'string', enum: CHANGE_KEYS }, description: 'Every kind of change in your fix, by key from the list in the prompt; empty unless outcome is applied.' },
     hunks: { type: 'string', description: 'The `git diff` (or `git show` after committing) of your change; empty unless outcome is applied.' },
@@ -231,7 +238,7 @@ const IMPL_SCHEMA = {
     commitSha: { type: ['string', 'null'] },
     notes: { type: 'string', description: 'Anything beyond the finding that a more complete fix would need.' },
   },
-  required: ['outcome', 'plan', 'reason', 'excludedKind', 'coveredBy', 'files', 'kinds', 'hunks', 'checks', 'committed', 'commitSha', 'notes'],
+  required: ['outcome', 'plan', 'reason', 'excludedKind', 'files', 'kinds', 'hunks', 'checks', 'committed', 'commitSha', 'notes'],
 }
 
 const SIBLING_SCHEMA = {
@@ -259,7 +266,7 @@ function finderPrompt(d) {
   const own = d.files.map((f) => `- ${f}${untrackedInScope.has(f) ? ' (untracked: read whole)' : ''}`).join('\n')
   const preExisting = input.scope === 'codebase'
     ? 'There is no base, so every defect in the files counts, whatever its age.'
-    : `Only defects the diff introduced or worsened. Pre-existing conditions the diff did not touch are out of scope unless the diff makes them worse. When the author's intent says the diff fixes a failure, an instance of that failure left on a code path the diff changed is an incomplete fix: it counts as introduced, at the severity of the failure itself.`
+    : `Only defects the diff introduced or worsened. Pre-existing conditions the diff did not touch are out of scope unless the diff makes them worse. But ${INCOMPLETE_FIX}.`
   return `${CONTEXT}
 
 ${READ_ONLY}
@@ -275,13 +282,13 @@ ${DIMENSION_LIST}
 Method: ${input.scope === 'codebase' ? 'read every file you own in full' : 'read every hunk of every file you own (untracked files whole)'}, then the surrounding current code and whatever callers or callees you need to be sure. Where a claim can be tested cheaply (a regex, a library contract, a runtime behaviour), test it with a small script in /tmp, by reading the library sources in node_modules or the equivalent, or by running an existing test. Report only what you verified: fewer, verified findings are worth more than many speculative ones.
 
 Rules:
-- Report real defects: wrong behaviour, security or tenancy gaps, races, leaks, data loss, regressions, contradictions between code and docs or copy, dead code, stale terminology (a term the project's domain or agent docs mark as avoided, deprecated or replaced, wherever it appears), and violations of rules you can quote from the project's agent docs.
+- Report real defects: wrong behaviour, security or tenancy gaps, races, leaks, data loss, regressions, contradictions between code and docs or copy, ${DEAD_CODE}, ${STALE_TERMINOLOGY}, and violations of rules you can quote from the project's agent docs.
 - Report each defect once, at its root location (the line whose change fixes it), even when several files you read expose it.
 - ${preExisting}
 - Judge a change by what it breaks, not by which commit carries it. A deletion is a defect only when you can name the code path, user or doc that still depends on what was deleted.
-- An instruction deleted from an LLM prompt or tool description is a defect only when the model, without it, breaks a contract it cannot infer: a format, a limit, a fact about the environment, what the tool accepts or returns. Coaching a current model follows unprompted (work autonomously, batch calls, summarise what it retrieves, retry a weak search, ask specific questions) is not a defect to restore.
+- An instruction deleted from an LLM prompt or tool description is a defect only when the model, without it, breaks a contract it cannot infer (${NON_INFERABLE_CONTRACT}). Coaching a current model follows unprompted (${UNPROMPTED_BEHAVIOUR}) is not a defect to restore.
 - A demonstrably false statement in user-facing copy, docs or error messages is a finding regardless of audience size. A false statement in a code comment counts only when a maintainer acting on it would introduce a bug or miss one.
-- A missing test is not a finding. A deleted test is one only when it could fail on a plausible regression of code that still exists; a test that recomputes the implementation's formula from the same constants, or asserts what a stub or hand-written mock returns, is not coverage.
+- A missing test is not a finding. A deleted test is one only when it could fail on a plausible regression of code that still exists; a test that ${HOLLOW_TEST}, is not coverage.
 - Style preferences without a quotable rule and speculative hardening are not findings.
 - Give the exact file and line in the current working tree. An empty findings list is a valid answer.`
 }
@@ -303,15 +310,15 @@ ${list}
 Answer with the id of the registered finding it duplicates, or null.`
 }
 
-function materialityPrompt(e, rerun) {
+function materialityPrompt(e) {
   const preExisting = input.scope === 'codebase'
     ? ''
-    : `; a pre-existing condition the diff neither introduced nor worsened (check with \`git diff ${BASE} -- <file>\` and \`git show ${BASE}:<file>\`). An incomplete fix is not pre-existing: when the author's intent says the diff fixes a failure, an instance of that failure left on a code path the diff changed counts as introduced, and you judge it at the severity of the failure, not of the false claim`
+    : `; a pre-existing condition the diff neither introduced nor worsened (check with \`git diff ${BASE} -- <file>\` and \`git show ${BASE}:<file>\`); but ${INCOMPLETE_FIX}`
   return `${CONTEXT}
 
 ${READ_ONLY}
 
-You are the MATERIALITY skeptic in an adversarial code review. Your job is to attack whether this finding matters, refuting by default when uncertain about its substance. ${rerun ? 'This is a re-run: the technical skeptic corrected the finding\'s description and its consequence changed, so judge the corrected version below afresh.' : ''}
+You are the MATERIALITY skeptic in an adversarial code review. Your job is to attack whether this finding matters, refuting by default when uncertain about its substance.
 
 ${findingText(e)}
 
@@ -320,8 +327,8 @@ Your verdict is four-way:
   - cosmetic-only consequence${preExisting};
   - a documented tradeoff that covers this specific regression (an ADR or doc accepting a related fallback does not excuse a new gap in a component that does implement the mechanism);
   - a removal the author's intent states, as a named item or as the general rule the commit applies, when the finding names no surviving code path, user or doc that depends on the deleted thing; a commit made by an earlier round of this review shows none of the author's decisions;
-  - a deleted prompt or tool-description instruction that restates behaviour a current model shows unprompted (working autonomously, batching calls, summarising, retrying a weak search, asking specific questions); the loss is real only for a contract the model cannot infer (a format, a limit, a fact about the environment, what the tool accepts or returns);
-  - a deleted test that could not fail on a plausible regression: one that recomputes the implementation's formula from the same constants, or asserts what a stub or hand-written mock returns.
+  - a deleted prompt or tool-description instruction that restates behaviour a current model shows unprompted (${UNPROMPTED_BEHAVIOUR}); the loss is real only for a contract the model cannot infer (${NON_INFERABLE_CONTRACT});
+  - a deleted test that could not fail on a plausible regression: one that ${HOLLOW_TEST}.
   A change lying outside its commit's stated scope is not a ground to confirm; judge it by what it breaks.
 - downgrade: the mechanism is real but the impact is overstated. Severity inflation alone is not a kill ground: downgrade and confirm. Say the severity you settle on. A downgrade because the path is rare, the configuration unlikely or the input unusual quotes the config, seed data, docs or callers that show it; without that evidence, keep the finding's severity.
 - upgrade: the mechanism is as described and its consequence sits in a higher tier of the severity scale than the finding claims. Quote the code, config or callers that place it there, and say the severity you settle on.
@@ -329,7 +336,7 @@ Your verdict is four-way:
 
 Carve-outs, where you may downgrade (e.g. to low) but must not refute:
 - A demonstrably false statement shipped to users (UI copy, translations, user-facing docs, error messages) is material by definition, however small its audience. "Nothing consumes it" and "no decision depends on it" are not valid kill grounds for factual incorrectness.
-- Dead code (an unreachable branch, an unused export, an obsolete option) and stale terminology (a term the project's domain or agent docs mark as avoided, deprecated or replaced) are material by definition: stale code misleads the next reader and spreads. A vocabulary rule applies to every surface in the repository (prompts, identifiers, comments, copy, docs, tests) unless the doc exempts that surface by name; do not narrow its scope by inference. "No user can see the mismatch", "the surrounding text already pins the correct term" and "other shipped code uses the same term" are not valid kill grounds; the last one widens the finding rather than refuting it.
+- ${DEAD_CODE[0].toUpperCase()}${DEAD_CODE.slice(1)} and ${STALE_TERMINOLOGY} are material by definition: stale code misleads the next reader and spreads. A vocabulary rule applies to every surface in the repository unless the doc exempts that surface by name; do not narrow its scope by inference. "No user can see the mismatch", "the surrounding text already pins the correct term" and "other shipped code uses the same term" are not valid kill grounds; the last one widens the finding rather than refuting it.
 
 Do not judge technical truth here (a later skeptic does); assume the mechanism is as described and ask whether it matters. Read the code and the docs you need to decide. Quote the code or doc your verdict rests on.`
 }
@@ -347,7 +354,7 @@ Verify it yourself: read the code at the location and along the path the finding
 
 Your verdict is three-way:
 - refute: the mechanism does not exist, or the code already handles it, or the trigger cannot occur. Uncertainty about whether the mechanism is real at all defaults to refute.
-- confirm_corrected: a detail in the finding is wrong (bad arithmetic, misattributed cause, overstated scenario) but your own verification shows the underlying defect is real in a corrected form at the same location. Give the corrected description; the implementer will work from it. A correction must be something you actually verified, not a charitable reinterpretation. Set consequenceChanged=true if the correction changes what the defect causes (not just its mechanics).
+- confirm_corrected: a detail in the finding is wrong (bad arithmetic, misattributed cause, overstated scenario) but your own verification shows the underlying defect is real in a corrected form at the same location. Give the corrected description; the implementer will work from it. A correction must be something you actually verified, not a charitable reinterpretation.
 - confirm_as_is: the finding is right as written.
 
 A wrong detail is only a kill ground when the failure mechanism collapses with it. Quote the code your verdict rests on.`
@@ -388,11 +395,6 @@ function protectedText() {
   return lines.join('\n')
 }
 
-function priorFixesText() {
-  if (priorFixes.length === 0) return 'No fix has been accepted earlier in this run.'
-  return `Fixes accepted earlier in this run (if one already covers this finding, change nothing and return outcome=covered with coveredBy):\n${priorFixes.map((p) => `- finding #${p.id} "${p.title}": ${p.sha ? `commit ${p.sha}` : 'uncommitted in the working tree'}, files ${p.files.join(', ')}`).join('\n')}`
-}
-
 function checksText() {
   if (CHECKS) {
     return `Then run the project checks relevant to what you touched:\n${CHECKS}\nFix what they flag without going beyond the finding. A check you cannot make pass that way means you undo your own hunks (\`git checkout -- <file>\` for a file that is not protected, editing back by hand for a protected one, deleting files you created) and return outcome=reverted with the plan and the reason.`
@@ -413,13 +415,11 @@ ${protectedText()}
 
 ${findingText(e)}
 ${sibText}
-${priorFixesText()}
-
-Plan your own fix: read the code around the finding, decide the smallest change that closes it (severity ${sev}), then check that change against the excluded kinds:
+Plan your own fix: read the code around the finding (if the defect can no longer occur, change nothing and return outcome=covered), decide the smallest change that closes it (severity ${sev}), then check that change against the excluded kinds:
 ${EXCLUDED}
 ${CHANGE_KINDS_TEXT}
 
-Minimal is relative to the finding, not to any larger plan: when a more complete fix exists beyond the finding, close the finding and describe the rest in notes. Never extend a fix to a sibling component the finding did not name (that is a new finding). Cheap means small relative to the finding, not quick to type. Follow the project's agent docs for any code or test you write; a test must never add complexity to production code (no test-only parameters, seams or exports), never assert a still-present bug, and never read source as text. A finding whose only defect is a missing test is fixed by adding that test. When a comment, doc or tool description warns about a defect in code, fix the code, not the warning.
+Minimal is relative to the finding, not to any larger plan: when a more complete fix exists beyond the finding, close the finding and describe the rest in notes. Never extend a fix to a sibling component the finding did not name (that is a new finding). Follow the project's agent docs for any code or test you write; a test must never add complexity to production code (no test-only parameters, seams or exports), never assert a still-present bug, and never read source as text. A finding whose only defect is a missing test is fixed by adding that test. When a comment, doc or tool description warns about a defect in code, fix the code, not the warning.
 
 Size alone is never a reason to refuse. If the smallest fix is an excluded kind, change nothing and return outcome=not_applied with the plan, the reason and its key as excludedKind.
 
@@ -492,13 +492,12 @@ function settledSeverity(mat, current) {
 }
 
 async function verify(e) {
-  const mat = await run(materialityPrompt(e, false), { label: `materiality #${e.id}`, phase: 'Verify', schema: MATERIALITY_SCHEMA, ...MATERIALITY_OPTS })
+  const mat = await run(materialityPrompt(e), { label: `materiality #${e.id}`, phase: 'Verify', schema: MATERIALITY_SCHEMA, ...MATERIALITY_OPTS })
   if (!mat) {
     e.status = 'agent_failed'
     e.failedAt = 'materiality skeptic'
     return
   }
-  e.verdicts.push({ skeptic: 'materiality', ...mat })
   if (mat.verdict === 'refute') {
     e.status = 'refuted'
     e.refutedBy = 'materiality'
@@ -514,7 +513,6 @@ async function verify(e) {
     e.failedAt = 'technical skeptic'
     return
   }
-  e.verdicts.push({ skeptic: 'technical', ...tech })
   if (tech.verdict === 'refute') {
     e.status = 'refuted'
     e.refutedBy = 'technical'
@@ -526,23 +524,6 @@ async function verify(e) {
     if (tech.correctedDescription) e.finalDescription = tech.correctedDescription
     if (tech.correctedTitle) e.finalTitle = tech.correctedTitle
     e.corrected = true
-    if (tech.consequenceChanged) {
-      const mat2 = await run(materialityPrompt(e, true), { label: `materiality (corrected) #${e.id}`, phase: 'Verify', schema: MATERIALITY_SCHEMA, ...MATERIALITY_OPTS })
-      if (!mat2) {
-        e.status = 'agent_failed'
-        e.failedAt = 'materiality skeptic (corrected re-run)'
-        return
-      }
-      e.verdicts.push({ skeptic: 'materiality (corrected)', ...mat2 })
-      if (mat2.verdict === 'refute') {
-        e.status = 'refuted'
-        e.refutedBy = 'materiality (after correction)'
-        e.refuteReason = mat2.reason
-        log(`#${e.id} refuted on materiality after correction`)
-        return
-      }
-      e.finalSeverity = settledSeverity(mat2, e.finalSeverity)
-    }
   }
   e.status = 'confirmed'
   log(`#${e.id} confirmed at ${e.finalSeverity}`)
@@ -571,7 +552,6 @@ function registerAndVerify(f, dim) {
       evidence: f.evidence,
       suggestedFix: f.suggestedFix,
       alsoReportedBy: [],
-      verdicts: [],
       status: 'pending',
       finalSeverity: null,
       finalTitle: null,
@@ -665,8 +645,7 @@ async function implement(e, siblings) {
   e.implementation = impl
   if (impl.outcome === 'covered') {
     e.outcome = 'covered'
-    e.coveredBy = impl.coveredBy
-    log(`#${e.id} covered by an earlier fix${impl.coveredBy ? ` (#${impl.coveredBy})` : ''}`)
+    log(`#${e.id} already closed in the current tree`)
     return
   }
   if (impl.outcome === 'not_applied') {
@@ -692,22 +671,17 @@ if (clusters.length > 0) {
   for (const cl of clusters) {
     const lead = byId(cl.leadId)
     const siblings = cl.memberIds.filter((id) => id !== cl.leadId).map(byId)
-    lead.clusterRootCause = cl.rootCause
-    lead.clusterSiblings = siblings.map((s) => s.id)
     await implement(lead, siblings)
     for (const s of siblings) {
-      s.clusterLead = lead.id
       if (lead.outcome === 'fixed') {
         const fix = priorFixes.find((p) => p.id === lead.id)
         const check = await run(siblingPrompt(s, lead, fix), { label: `sibling #${s.id} vs fix #${lead.id}`, phase: 'Cover', schema: SIBLING_SCHEMA, ...SIBLING_OPTS })
         if (check && check.covered) {
           s.outcome = 'covered'
           s.coveredBy = lead.id
-          s.coveredReason = check.reason
           log(`#${s.id} covered by the fix for #${lead.id}`)
           continue
         }
-        s.siblingGap = check ? check.reason : 'sibling check failed'
       }
       await implement(s, [])
     }
@@ -732,10 +706,8 @@ return {
     id: e.id,
     dimension: e.dimension,
     title: e.finalTitle ?? e.title,
-    originalTitle: e.title,
     file: e.file,
     line: e.line,
-    claimedSeverity: e.severity,
     severity: e.finalSeverity ?? e.severity,
     description: e.finalDescription ?? e.description,
     corrected: e.corrected === true,
@@ -744,7 +716,6 @@ return {
     refuteReason: e.refuteReason ?? null,
     failedAt: e.failedAt ?? null,
     alsoReportedBy: e.alsoReportedBy,
-    verdicts: e.verdicts,
     outcome: e.outcome ?? null,
     committed: e.committed ?? null,
     commitSha: e.commitSha ?? null,
@@ -757,10 +728,5 @@ return {
     excludedKind: e.implementation ? e.implementation.excludedKind : null,
     notes: e.implementation ? e.implementation.notes : null,
     coveredBy: e.coveredBy ?? null,
-    coveredReason: e.coveredReason ?? null,
-    siblingGap: e.siblingGap ?? null,
-    clusterLead: e.clusterLead ?? null,
-    clusterSiblings: e.clusterSiblings ?? null,
-    clusterRootCause: e.clusterRootCause ?? null,
   })),
 }
