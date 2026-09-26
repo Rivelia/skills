@@ -49,6 +49,9 @@ for (const key of ['checks', 'checkCmd', 'excludePattern', 'model', 'intent']) {
     throw new Error(`args.${key}: a non-empty string when given; omit it otherwise`)
   }
 }
+if (input.loopStart !== undefined && (typeof input.loopStart !== 'string' || !/^[0-9a-f]{7,40}$/.test(input.loopStart) || input.scope === 'codebase')) {
+  throw new Error('args.loopStart: the hex commit a dead earlier run of this loop started from, only for a scope with a base; omit it otherwise')
+}
 if (input.excludePattern && input.excludePattern.includes("'")) {
   throw new Error('args.excludePattern: the pattern is embedded in single quotes in a shell command and may not contain one')
 }
@@ -93,6 +96,9 @@ const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit
 const GIT = 'git -c core.quotePath=false'
 const LIST_TRACKED_CMD = SCOPE === 'codebase' ? `${GIT} ls-files` : `${GIT} diff --name-only ${BASE}`
 const LOG_CMD = BASE ? `${GIT} log --format='--- %H%n%B' ${BASE}..HEAD` : null
+// A relaunch after a dead run passes the commit that run started from, so the
+// fixes it committed are set apart from the author's commits like this run's own.
+const LOOP_START = input.loopStart || null
 
 // ---------- schemas ----------
 
@@ -159,6 +165,7 @@ const STATE_SECTIONS = [
   { name: 'untracked', kind: 'list', cmd: `${GIT} ls-files -o --exclude-standard` },
   { name: 'tracked', kind: 'list', cmd: LIST_TRACKED_CMD },
   { name: 'log', kind: 'text', cmd: LOG_CMD || ':' },
+  ...(LOOP_START ? [{ name: 'loopCommits', kind: 'list', cmd: `${GIT} rev-list ${LOOP_START}..HEAD` }] : []),
 ]
 
 // The state's log is a sequence of "--- <sha>" markers, each followed by
@@ -180,17 +187,17 @@ function parseLog(log) {
 
 // The intent every agent of the round reads: the user's note, then the
 // branch's commit messages verbatim, with the commits earlier rounds of this
-// loop made set apart so a restore the review itself committed never reads as
-// the author's decision.
-function buildIntent(log) {
-  const reviewShas = new Set(allFixes.map((f) => f.sha).filter(Boolean))
+// loop (or of the dead run it relaunches) made set apart so a restore the
+// review itself committed never reads as the author's decision.
+function buildIntent(log, loopCommits) {
+  const reviewShas = new Set([...allFixes.map((f) => f.sha).filter(Boolean), ...(loopCommits || [])])
   const commits = parseLog(log)
   const authored = commits.filter((c) => !reviewShas.has(c.sha))
   const mine = commits.filter((c) => reviewShas.has(c.sha))
   const parts = []
   if (INTENT_NOTE) parts.push(INTENT_NOTE)
   if (authored.length) parts.push(authored.map((c) => `--- ${c.sha.slice(0, 9)}\n${c.message}`).join('\n'))
-  if (mine.length) parts.push(`Commits ${mine.map((c) => c.sha.slice(0, 9)).join(', ')} were made by an earlier round of this review, not by the author; they carry none of the author's decisions.`)
+  if (mine.length) parts.push(`Commits ${mine.map((c) => c.sha.slice(0, 9)).join(', ')} were made by an earlier round of this review loop, not by the author; they carry none of the author's decisions.`)
   return parts.length ? parts.join('\n\n') : null
 }
 
@@ -422,7 +429,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     stopDetail = `round ${round} found nothing in scope`
     break
   }
-  const intent = buildIntent(state.log)
+  const intent = buildIntent(state.log, state.loopCommits)
   const scout = await run(scoutPrompt(state, inScope, intent), { label: `scout @${round}`, phase: 'Scout', schema: DIMENSIONS_SCHEMA, ...SCOUT_OPTS })
   if (!scout) {
     stopReason = 'agent-failed'

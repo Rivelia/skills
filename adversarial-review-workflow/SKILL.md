@@ -45,6 +45,8 @@ A Workflow reviews the scoped code: one finder per review dimension proposes def
 
    Pass `dirtyAtLaunch`, `untracked`, `dimensions` and each `files` as real JSON arrays, not JSON-encoded strings. The script validates the args and throws on a missing one.
 
+   **If the run dies** (a session limit, a killed task), never resume it with `resumeFromRunId`, whatever the harness suggests. The cache key of each agent call chains every call issued before it, and the finders and skeptics issue theirs in the order earlier calls finish, so a resume misses partway through, re-runs the rest live against a tree that already holds the fixes, and the skeptics refute every finding as already fixed. Relaunch from step 1 against the current tree instead. In `intent`, after the log, name the commits the dead run made (the `commitSha` of its `implement #N` results in its `journal.jsonl`) as made by an earlier run of this review, not by the author.
+
    Phases and rules the script enforces, so you know what the result means:
    - Find (Opus, medium): one finder per dimension, reporting each defect once at its root location. A deletion is a defect only with a named surviving dependent; a prompt or tool-description instruction a current model follows unprompted, a test that could not fail on a plausible regression, and a change lying outside its commit's stated scope are not defects.
    - Dedup (Sonnet, medium): each candidate is compared with every finding registered at that moment; a duplicate attaches to the earlier finding as "also reported by" and inherits its verdicts and outcome. Dedup is serialized; verification is not.
