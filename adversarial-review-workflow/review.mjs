@@ -56,13 +56,13 @@ const INTENT = typeof input.intent === 'string' && input.intent.trim() ? input.i
 const IMPLEMENTER_MODEL = input.implementerModel ? input.implementerModel.trim() : null
 
 const FINDER_OPTS = { model: 'opus', effort: 'medium' }
-const DEDUP_OPTS = { model: 'sonnet', effort: 'low' }
+const DEDUP_OPTS = { model: 'sonnet', effort: 'medium' }
 const MATERIALITY_OPTS = { model: 'opus', effort: 'medium' }
 const TECHNICAL_OPTS = { model: 'opus', effort: 'high' }
 const CLUSTER_OPTS = { model: 'opus', effort: 'medium' }
 const SIBLING_OPTS = { model: 'opus', effort: 'high' }
 const CLEANUP_OPTS = { model: 'sonnet', effort: 'low' }
-const implementerOpts = (severity) => ({ ...(IMPLEMENTER_MODEL ? { model: IMPLEMENTER_MODEL } : {}), effort: severity === 'low' ? 'low' : 'medium' })
+const implementerOpts = (severity) => ({ ...(IMPLEMENTER_MODEL ? { model: IMPLEMENTER_MODEL } : {}), effort: severity === 'low' ? 'medium' : 'high' })
 
 // ---------- shared prompt fragments ----------
 

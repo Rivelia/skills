@@ -2,7 +2,7 @@ export const meta = {
   name: 'merge-ready',
   description: 'Repeat the adversarial code review over a scope, re-scouting the finders each round, until a round fixes nothing medium or higher that changes production behaviour and fewer than half its finders reported a medium-or-higher fix; then simplify the same scope',
   phases: [
-    { title: 'Scout', detail: 'Sonnet records the tree state and the branch log, then the session model (or args.model) designs the finder dimensions afresh for the round' },
+    { title: 'Scout', detail: 'Sonnet records the tree state and the branch log, then the session model (or args.model) at medium effort designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
     { title: 'Triage', detail: 'Opus classifies each fixed medium-or-higher finding by the kinds of change in its hunks; a production kind means another round', model: 'opus' },
     { title: 'Prepare', detail: 'Sonnet computes the simplify inputs: file list, prune candidates, untracked baseline, tree hash', model: 'sonnet' },
@@ -68,7 +68,7 @@ const MODEL = input.model ? input.model.trim() : undefined
 const PRUNE_EXTS = input.pruneExts.map((e) => (e.startsWith('.') ? e : `.${e}`))
 
 const STATE_OPTS = { model: 'sonnet', effort: 'low' }
-const SCOUT_OPTS = MODEL ? { model: MODEL } : {}
+const SCOUT_OPTS = { ...(MODEL ? { model: MODEL } : {}), effort: 'medium' }
 const TRIAGE_OPTS = { model: 'opus', effort: 'medium' }
 const PREPARE_OPTS = { model: 'sonnet', effort: 'low' }
 // ---------- shared prompt fragments ----------
