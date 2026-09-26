@@ -13,7 +13,7 @@ export const meta = {
 }
 
 const SCOPES = ['uncommitted', 'branch', 'unpushed', 'codebase']
-const SEVERITIES = ['low', 'medium', 'high', 'critical']
+const SEVERITIES = ['nit', 'low', 'medium', 'high', 'critical']
 
 const input = typeof args === 'string' ? JSON.parse(args) : args
 
@@ -57,12 +57,14 @@ const IMPLEMENTER_MODEL = input.implementerModel ? input.implementerModel.trim()
 
 const FINDER_OPTS = { model: 'opus', effort: 'medium' }
 const DEDUP_OPTS = { model: 'sonnet', effort: 'medium' }
-const MATERIALITY_OPTS = { model: 'opus', effort: 'medium' }
-const TECHNICAL_OPTS = { model: 'opus', effort: 'high' }
 const CLUSTER_OPTS = { model: 'opus', effort: 'medium' }
 const SIBLING_OPTS = { model: 'opus', effort: 'high' }
 const CLEANUP_OPTS = { model: 'sonnet', effort: 'low' }
-const implementerOpts = (severity) => ({ ...(IMPLEMENTER_MODEL ? { model: IMPLEMENTER_MODEL } : {}), effort: severity === 'low' ? 'medium' : 'high' })
+// The materiality skeptic runs before the severity is settled, so it scales on
+// the finder's claim; the technical skeptic scales on the settled severity.
+const materialityOpts = (severity) => ({ model: 'opus', effort: ['nit', 'low'].includes(severity) ? 'medium' : 'high' })
+const technicalOpts = (severity) => ({ model: 'opus', effort: { nit: 'low', low: 'medium' }[severity] ?? 'high' })
+const implementerOpts = (severity) => ({ ...(IMPLEMENTER_MODEL ? { model: IMPLEMENTER_MODEL } : {}), effort: { nit: 'low', low: 'medium' }[severity] ?? 'high' })
 
 // ---------- shared prompt fragments ----------
 
@@ -101,7 +103,7 @@ const HOLLOW_TEST = "recomputes the implementation's formula from the same const
 const CONTEXT = `Repository: ${ROOT}.
 ${input.context.trim()}
 ${scopeText()}${INTENT_TEXT}
-Severity scale: critical = data loss or corruption, a security breach, or a crash of the production process; high = wrong behaviour on a path users hit in normal use, a deadlock, hang or resource leak under normal load, a cost or quality regression on every request of an affected configuration (a cache miss, dropped context), or a security or tenancy gap; medium = wrong behaviour on an edge path, a real leak or race that is hard to hit, a convention violation the project's agent docs state explicitly, or a false statement in docs or comments a maintainer would act on; low = a demonstrably false statement shipped to users (UI copy, translations, docs, error messages), a misleading comment, ${DEAD_CODE} or ${STALE_TERMINOLOGY}, or a small robustness issue with no user-visible effect today.`
+Severity scale: critical = data loss or corruption, a security breach, or a crash of the production process; high = wrong behaviour on a path users hit in normal use, a deadlock, hang or resource leak under normal load, a cost or quality regression on every request of an affected configuration (a cache miss, dropped context), or a security or tenancy gap; medium = wrong behaviour on an edge path, a real leak or race that is hard to hit, a convention violation the project's agent docs state explicitly, or a false statement in docs or comments a maintainer would act on; low = a demonstrably false statement shipped to users (UI copy, translations, docs, error messages), a misleading comment, ${DEAD_CODE} or ${STALE_TERMINOLOGY}, or a small robustness issue with no user-visible effect today; nit = a cosmetic flaw that changes no behaviour and misleads no one: a typo or grammar slip (in copy, docs, comments, log text or an identifier) or a name that breaks the pattern of the names around it.`
 
 const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit, create or delete files under ${ROOT}, and run no git command that changes state (no checkout, restore, stash, commit, reset, clean). Scratch files go in /tmp. You may run existing tests and small scripts from /tmp.`
 
@@ -289,7 +291,7 @@ Rules:
 - An instruction deleted from an LLM prompt or tool description is a defect only when the model, without it, breaks a contract it cannot infer (${NON_INFERABLE_CONTRACT}). Coaching a current model follows unprompted (${UNPROMPTED_BEHAVIOUR}) is not a defect to restore.
 - A demonstrably false statement in user-facing copy, docs or error messages is a finding regardless of audience size. A false statement in a code comment counts only when a maintainer acting on it would introduce a bug or miss one.
 - A missing test is not a finding. A deleted test is one only when it could fail on a plausible regression of code that still exists; a test that ${HOLLOW_TEST}, is not coverage.
-- Style preferences without a quotable rule and speculative hardening are not findings.
+- A cosmetic flaw the severity scale rates nit is a finding at nit. Style preferences without a quotable rule and speculative hardening are not findings.
 - Give the exact file and line in the current working tree. An empty findings list is a valid answer.`
 }
 
@@ -324,7 +326,7 @@ ${findingText(e)}
 
 Your verdict is four-way:
 - refute: the finding's substance fails. Valid grounds, and no others:
-  - cosmetic-only consequence${preExisting};
+  - a style preference no quotable rule states${preExisting};
   - a documented tradeoff that covers this specific regression (an ADR or doc accepting a related fallback does not excuse a new gap in a component that does implement the mechanism);
   - a removal the author's intent states, as a named item or as the general rule the commit applies, when the finding names no surviving code path, user or doc that depends on the deleted thing; a commit made by an earlier round of this review shows none of the author's decisions;
   - a deleted prompt or tool-description instruction that restates behaviour a current model shows unprompted (${UNPROMPTED_BEHAVIOUR}); the loss is real only for a contract the model cannot infer (${NON_INFERABLE_CONTRACT});
@@ -337,6 +339,7 @@ Your verdict is four-way:
 Carve-outs, where you may downgrade (e.g. to low) but must not refute:
 - A demonstrably false statement shipped to users (UI copy, translations, user-facing docs, error messages) is material by definition, however small its audience. "Nothing consumes it" and "no decision depends on it" are not valid kill grounds for factual incorrectness.
 - ${DEAD_CODE[0].toUpperCase()}${DEAD_CODE.slice(1)} and ${STALE_TERMINOLOGY} are material by definition: stale code misleads the next reader and spreads. A vocabulary rule applies to every surface in the repository unless the doc exempts that surface by name; do not narrow its scope by inference. "No user can see the mismatch", "the surrounding text already pins the correct term" and "other shipped code uses the same term" are not valid kill grounds; the last one widens the finding rather than refuting it.
+- A cosmetic flaw the severity scale rates nit is material at nit: downgrade a cosmetic-only finding to nit rather than refute it.
 
 Do not judge technical truth here (a later skeptic does); assume the mechanism is as described and ask whether it matters. Read the code and the docs you need to decide. Quote the code or doc your verdict rests on.`
 }
@@ -492,7 +495,7 @@ function settledSeverity(mat, current) {
 }
 
 async function verify(e) {
-  const mat = await run(materialityPrompt(e), { label: `materiality #${e.id}`, phase: 'Verify', schema: MATERIALITY_SCHEMA, ...MATERIALITY_OPTS })
+  const mat = await run(materialityPrompt(e), { label: `materiality #${e.id}`, phase: 'Verify', schema: MATERIALITY_SCHEMA, ...materialityOpts(e.severity) })
   if (!mat) {
     e.status = 'agent_failed'
     e.failedAt = 'materiality skeptic'
@@ -507,7 +510,7 @@ async function verify(e) {
   }
   e.finalSeverity = settledSeverity(mat, e.severity)
 
-  const tech = await run(technicalPrompt(e), { label: `technical #${e.id}`, phase: 'Verify', schema: TECHNICAL_SCHEMA, ...TECHNICAL_OPTS })
+  const tech = await run(technicalPrompt(e), { label: `technical #${e.id}`, phase: 'Verify', schema: TECHNICAL_SCHEMA, ...technicalOpts(e.finalSeverity) })
   if (!tech) {
     e.status = 'agent_failed'
     e.failedAt = 'technical skeptic'

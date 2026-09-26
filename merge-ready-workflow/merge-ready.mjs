@@ -15,8 +15,8 @@ const SCOPES = ['uncommitted', 'branch', 'unpushed', 'codebase']
 // hunks change what shipped code does gives fresh finders new behaviour to
 // attack. And when at least half the finders reported a medium-or-higher fix,
 // production or not, their attention went to the issues they found, so what
-// they did not reach is still there. A low fix (copy, a comment, dead code)
-// counts for neither.
+// they did not reach is still there. A low or nit fix (copy, a comment, dead
+// code, a typo) counts for neither.
 const COUNTED = ['medium', 'high', 'critical']
 // Backstop only: the loop ends on its own once a round fixes too little to
 // justify another. Each round spends a few dozen agents and the simplify
