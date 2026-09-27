@@ -435,7 +435,9 @@ function parseCopy(lines, sections) {
 
 // The first copy runs the command and lays out the parts; the parts past the
 // first are copied in parallel. A copy that fails its check is retried once;
-// the second failure, or any refusal, ends the step.
+// the second failure ends the step. A refusal is one agent's judgement of the
+// harness's framing, which its siblings with the same prompt did not share, so
+// it is retried like any other failed copy.
 async function runCopy(sections, what, label, phase, opts) {
   const head = await copyAttempts(copyPrompt(sections, what), label, phase, opts, parseHead)
   if (!head.value) return head
@@ -449,20 +451,15 @@ async function runCopy(sections, what, label, phase, opts) {
 }
 
 async function copyAttempts(prompt, label, phase, opts, parse) {
-  let dead = 0
+  const failures = []
   for (let attempt = 1; attempt <= 2; attempt++) {
     const r = await run(prompt, { label: `${label}.${attempt}`, phase, schema: COPY_SCHEMA, ...opts })
-    if (!r) dead++
-    else if (r.declined && r.declined.trim()) return { value: null, error: `the ${label} agent declined to run the command: ${r.declined.trim()}` }
-    const value = r ? parse(r.output) : null
+    const declined = r && r.declined && r.declined.trim()
+    const value = r && !declined ? parse(r.output) : null
     if (value) return { value, error: null }
+    failures.push(!r ? 'died' : declined ? `declined to run the command (${declined})` : 'returned an output that failed its check')
   }
-  return {
-    value: null,
-    error: dead === 2
-      ? `the ${label} agent died twice`
-      : `the ${label} agent returned an output that failed its check ${dead === 0 ? 'twice' : 'once and died once'}`,
-  }
+  return { value: null, error: `the ${label} agent ${failures[0] === failures[1] ? `${failures[0]} twice` : `${failures[0]}, then ${failures[1]}`}` }
 }
 
 function shellQuote(s) {
