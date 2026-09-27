@@ -103,7 +103,10 @@ const LOOP_START = input.loopStart || null
 
 const COPY_SCHEMA = {
   type: 'object',
-  properties: { output: { type: 'string' } },
+  properties: {
+    output: { type: 'string', description: 'The command\'s output, verbatim.' },
+    declined: { type: 'string', description: 'Only when you did not run the command: why, in one sentence. Leave output empty then.' },
+  },
   required: ['output'],
 }
 
@@ -163,6 +166,11 @@ const STATUS_PATHS_CMD = `${GIT} status --porcelain -z | while IFS= read -r -d '
 // else at HEAD when round 1 reads the state. Round 1 copies their messages
 // once, since no round changes them; every later round lists only the shas of
 // the commits the loop added since, whose messages the intent never quotes.
+const STATE_WHAT = BASE
+  ? `the files dirty, untracked and changed against ${BASE.slice(0, 9)}, and the branch's commits, which the review round reads`
+  : 'the files dirty, untracked and tracked, which the review round reads'
+const PREPARE_WHAT = 'the file lists and tree hash the simplify pass starts from'
+
 function stateSections(round, authorEnd) {
   const sections = [
     { name: 'dirtyAtLaunch', kind: 'list', cmd: STATUS_PATHS_CMD },
@@ -281,54 +289,65 @@ function prepareSections() {
 // A cheap agent sorting several outputs into several fields once returned an
 // empty pruneFiles its own command had just printed two paths for. So the
 // agent copies one block of output and the script splits it on marker lines.
-const MARKER = '::merge-ready::'
+const MARKER = '::section::'
 // The harness swaps a Bash result over about 30 KB for a pointer to a file,
 // which the agent then pages through and reassembles by hand; a 90 KB log
 // copied that way came back with 34 commits missing and passed every marker
-// check. So the command writes its output to a file and the agents copy it
-// in chunks that each fit one Bash result, each checked against its cksum.
+// check. So the output is copied in parts that each fit one Bash result, each
+// checked against its cksum. Every part re-runs the same read-only commands in
+// the repository and keeps its own line range: agents asked to relay an opaque
+// temp file refused it as a smuggled signal.
 const CHUNK_BYTES = 20000
 
-const COPY_RULE = `Return its entire output verbatim as \`output\`: every line, including the \`${MARKER}\` lines, in order, nothing added or removed. Do not read, review or edit any project file.`
-
-function copyPrompt(sections) {
+function copyBody(sections) {
   const body = sections.map((sec) => `echo '${MARKER} ${sec.name}'\n${sec.cmd}`).join('\n')
-  const ranges = `awk -v max=${CHUNK_BYTES} '{ l = length($0) + 1; if (n && b + l > max) { print s, NR - 1; n = 0; b = 0 } if (!n) s = NR; n++; b += l } END { if (n) print s, NR }' "$f"`
-  return `Repository: ${ROOT}. Run exactly this shell command via Bash, unmodified, as a single call:
-
-cd ${shellQuote(ROOT)} && f=$(mktemp) && (
+  return `cd ${shellQuote(ROOT)} && (
 ${body}
 echo '${MARKER} end'
-) > "$f" && r=$(${ranges}) && echo "${MARKER}file $f" && echo "$r" | while read -r s e; do echo "${MARKER}chunk $s $e $(sed -n "$s,\${e}p" "$f" | cksum)"; done && sed -n "$(echo "$r" | head -n 1 | tr ' ' ',')p" "$f"
+)`
+}
+
+function copyIntro(what) {
+  return `You are a helper of the merge-ready code review loop the user launched on the repository ${ROOT}. The loop's script cannot run commands itself, so it asks you to run one and hand back its output: ${what}. The command only reads git state and files; it changes nothing. The \`${MARKER}\` lines are headers the script splits the output on.`
+}
+
+const COPY_RULE = 'Return its entire output verbatim as `output`: every line, in order, nothing added, removed or reworded. The script checks the copy against a checksum. There is nothing to review in it, so you need not open any file.'
+
+function copyPrompt(sections, what) {
+  const ranges = `awk -v max=${CHUNK_BYTES} '{ l = length($0) + 1; if (n && b + l > max) { print s, NR - 1; n = 0; b = 0 } if (!n) s = NR; n++; b += l } END { if (n) print s, NR }' "$f"`
+  return `${copyIntro(what)} A Bash result over about 30 KB comes back cut, so the command numbers the output's lines into parts of at most ${CHUNK_BYTES} bytes, prints one \`::part::\` line per part (first line, last line, cksum), then the first part itself; other helpers fetch the remaining parts.
+
+Run exactly this shell command via Bash, unmodified, as a single call:
+
+f=$(mktemp) && ${copyBody(sections)} > "$f" && r=$(${ranges}) && echo "$r" | while read -r s e; do echo "::part:: $s $e $(sed -n "$s,\${e}p" "$f" | cksum)"; done && sed -n "$(echo "$r" | head -n 1 | tr ' ' ',')p" "$f"; rm -f "$f"
 
 ${COPY_RULE}`
 }
 
-function chunkPrompt(file, chunk) {
-  return `Run exactly this shell command via Bash, unmodified, as a single call:
+function chunkPrompt(sections, what, chunk, index, count) {
+  return `${copyIntro(what)} A Bash result over about 30 KB comes back cut, so the output is fetched in ${count} parts; this is part ${index}, lines ${chunk.start} to ${chunk.end}, which the \`sed\` at the end keeps.
 
-sed -n '${chunk.start},${chunk.end}p' ${shellQuote(file)}
+Run exactly this shell command via Bash, unmodified, as a single call:
+
+${copyBody(sections)} | sed -n '${chunk.start},${chunk.end}p'
 
 ${COPY_RULE}`
 }
 
-// The first copy carries the file path, one line per chunk with its line range
-// and cksum, then the first chunk itself.
+// The first copy carries one line per part with its line range and cksum,
+// then the first part itself.
 function parseHead(output) {
   const lines = String(output || '').split('\n').map((l) => l.replace(/\r$/, ''))
-  let file = null
   const chunks = []
   let i = 0
   for (; i < lines.length; i++) {
-    const f = new RegExp(`^${MARKER}file (\\S+)\\s*$`).exec(lines[i])
-    const c = new RegExp(`^${MARKER}chunk (\\d+) (\\d+) (\\d+) (\\d+)\\s*$`).exec(lines[i])
-    if (f) file = f[1]
-    else if (c) chunks.push({ start: +c[1], end: +c[2], crc: +c[3], bytes: +c[4] })
-    else if (file) break
+    const c = /^::part:: (\d+) (\d+) (\d+) (\d+)\s*$/.exec(lines[i])
+    if (c) chunks.push({ start: +c[1], end: +c[2], crc: +c[3], bytes: +c[4] })
+    else if (chunks.length) break
   }
-  if (!file || !chunks.length || chunks.some((c, k) => c.start !== (k ? chunks[k - 1].end + 1 : 1) || c.end < c.start)) return null
+  if (!chunks.length || chunks.some((c, k) => c.start !== (k ? chunks[k - 1].end + 1 : 1) || c.end < c.start)) return null
   const first = verifyChunk(lines.slice(i).join('\n'), chunks[0])
-  return first ? { file, chunks, first } : null
+  return first ? { chunks, first } : null
 }
 
 // A chunk's lines, or null unless they are byte for byte the ones sed printed.
@@ -414,17 +433,18 @@ function parseCopy(lines, sections) {
   return value
 }
 
-// The first copy runs the command; the chunks past the first are copied in
-// parallel from the file it wrote. A copy that fails its check is retried
-// once; the second failure ends the step.
-async function runCopy(sections, label, phase, opts) {
-  const head = await copyAttempts(copyPrompt(sections), label, phase, opts, parseHead)
+// The first copy runs the command and lays out the parts; the parts past the
+// first are copied in parallel. A copy that fails its check is retried once;
+// the second failure, or any refusal, ends the step.
+async function runCopy(sections, what, label, phase, opts) {
+  const head = await copyAttempts(copyPrompt(sections, what), label, phase, opts, parseHead)
   if (!head.value) return head
-  const rest = await parallel(head.value.chunks.slice(1).map((chunk, k) => () =>
-    copyAttempts(chunkPrompt(head.value.file, chunk), `${label} part ${k + 2}`, phase, opts, (out) => verifyChunk(out, chunk))))
+  const { chunks, first } = head.value
+  const rest = await parallel(chunks.slice(1).map((chunk, k) => () =>
+    copyAttempts(chunkPrompt(sections, what, chunk, k + 2, chunks.length), `${label} part ${k + 2}`, phase, opts, (out) => verifyChunk(out, chunk))))
   const failed = rest.findIndex((r) => !r || !r.value)
   if (failed >= 0) return { value: null, error: rest[failed] ? rest[failed].error : `the ${label} part ${failed + 2} copy threw` }
-  const value = parseCopy([...head.value.first, ...rest.flatMap((r) => r.value)], sections)
+  const value = parseCopy([...first, ...rest.flatMap((r) => r.value)], sections)
   return value ? { value, error: null } : { value: null, error: `the ${label} output lacks a section marker` }
 }
 
@@ -433,6 +453,7 @@ async function copyAttempts(prompt, label, phase, opts, parse) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     const r = await run(prompt, { label: `${label}.${attempt}`, phase, schema: COPY_SCHEMA, ...opts })
     if (!r) dead++
+    else if (r.declined && r.declined.trim()) return { value: null, error: `the ${label} agent declined to run the command: ${r.declined.trim()}` }
     const value = r ? parse(r.output) : null
     if (value) return { value, error: null }
   }
@@ -440,7 +461,7 @@ async function copyAttempts(prompt, label, phase, opts, parse) {
     value: null,
     error: dead === 2
       ? `the ${label} agent died twice`
-      : `the ${label} agent returned an incomplete output ${dead === 0 ? 'twice' : 'once and died once'}`,
+      : `the ${label} agent returned an output that failed its check ${dead === 0 ? 'twice' : 'once and died once'}`,
   }
 }
 
@@ -523,7 +544,7 @@ log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_RO
 
 for (let round = 1; round <= MAX_ROUNDS; round++) {
   phase('Scout')
-  const { value: state, error: stateError } = await runCopy(stateSections(round, authorEnd), `state @${round}`, 'Scout', STATE_OPTS)
+  const { value: state, error: stateError } = await runCopy(stateSections(round, authorEnd), STATE_WHAT, `state @${round}`, 'Scout', STATE_OPTS)
   if (!state) {
     stopReason = 'agent-failed'
     stopDetail = `round ${round}: ${stateError}`
@@ -570,7 +591,6 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     dimensions: dimensions.map(({ key, title, files }) => ({ key, title, files })),
     unassignedFiles: missing,
     dirtyAtLaunch: state.dirtyAtLaunch,
-    intent,
     review,
     error,
     triage: null,
@@ -678,7 +698,7 @@ if (stopReason !== 'converged') {
 } else {
   phase('Prepare')
   const hashCmd = hashCommand()
-  const { value: prep, error: prepError } = await runCopy(prepareSections(), 'prepare simplify', 'Prepare', PREPARE_OPTS)
+  const { value: prep, error: prepError } = await runCopy(prepareSections(), PREPARE_WHAT, 'prepare simplify', 'Prepare', PREPARE_OPTS)
   if (!prep) {
     simplify = { ran: false, skipped: 'prepare-failed', error: prepError, result: null }
     log(`simplify skipped: ${prepError}`)
