@@ -2,7 +2,7 @@ export const meta = {
   name: 'merge-ready',
   description: 'Repeat the adversarial code review over a scope, re-scouting the finders each round, until a round fixes nothing medium or higher that changes production behaviour and fewer than half its finders reported a medium-or-higher fix; then simplify the same scope',
   phases: [
-    { title: 'Scout', detail: 'Sonnet records the tree state and the branch log, then the session model (or args.model) at medium effort designs the finder dimensions afresh for the round' },
+    { title: 'Scout', detail: 'Sonnet records the tree state and, in round 1, the author\'s commit log, then the session model (or args.model) at medium effort designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
     { title: 'Triage', detail: 'Opus classifies each fixed medium-or-higher finding by the kinds of change in its hunks; a production kind means another round', model: 'opus' },
     { title: 'Prepare', detail: 'Sonnet computes the simplify inputs: file list, prune candidates, untracked baseline, tree hash', model: 'sonnet' },
@@ -63,7 +63,7 @@ const CHECKS = input.checks ? input.checks.trim() : null
 const CHECK_CMD = input.checkCmd ? input.checkCmd.trim() : null
 const EXCLUDE = input.excludePattern ? input.excludePattern.trim() : DEFAULT_EXCLUDE
 // The author's note on what the diff deliberately does, when the user gave one;
-// the branch's commit messages are collected by the state agent every round.
+// the branch's commit messages are collected by the first round's state agent.
 const INTENT_NOTE = input.intent ? input.intent.trim() : null
 // The model argument replaces the session model wherever that is the default: the scout
 // here, the review implementers, the simplify appliers. Every other agent keeps its model.
@@ -95,7 +95,6 @@ const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit
 
 const GIT = 'git -c core.quotePath=false'
 const LIST_TRACKED_CMD = SCOPE === 'codebase' ? `${GIT} ls-files` : `${GIT} diff --name-only ${BASE}`
-const LOG_CMD = BASE ? `${GIT} log --format='--- %H%n%B' ${BASE}..HEAD` : null
 // A relaunch after a dead run passes the commit that run started from, so the
 // fixes it committed are set apart from the author's commits like this run's own.
 const LOOP_START = input.loopStart || null
@@ -160,13 +159,24 @@ function triageSchema(changeKinds) {
 // path, so the section is a plain path list like the others.
 const STATUS_PATHS_CMD = `${GIT} status --porcelain -z | while IFS= read -r -d '' e; do echo "\${e:3}"; case "\${e:0:2}" in *R*|*C*) IFS= read -r -d '' e; echo "$e";; esac; done`
 
-const STATE_SECTIONS = [
-  { name: 'dirtyAtLaunch', kind: 'list', cmd: STATUS_PATHS_CMD },
-  { name: 'untracked', kind: 'list', cmd: `${GIT} ls-files -o --exclude-standard` },
-  { name: 'tracked', kind: 'list', cmd: LIST_TRACKED_CMD },
-  { name: 'log', kind: 'text', cmd: LOG_CMD || ':' },
-  ...(LOOP_START ? [{ name: 'loopCommits', kind: 'list', cmd: `${GIT} rev-list ${LOOP_START}..HEAD` }] : []),
-]
+// The author's commits end where the loop's begin: at loopStart on a relaunch,
+// else at HEAD when round 1 reads the state. Round 1 copies their messages
+// once, since no round changes them; every later round lists only the shas of
+// the commits the loop added since, whose messages the intent never quotes.
+function stateSections(round, authorEnd) {
+  const sections = [
+    { name: 'dirtyAtLaunch', kind: 'list', cmd: STATUS_PATHS_CMD },
+    { name: 'untracked', kind: 'list', cmd: `${GIT} ls-files -o --exclude-standard` },
+    { name: 'tracked', kind: 'list', cmd: LIST_TRACKED_CMD },
+  ]
+  if (!BASE) return sections
+  if (round === 1) {
+    if (!authorEnd) sections.push({ name: 'head', kind: 'commit', cmd: `${GIT} rev-parse HEAD` })
+    sections.push({ name: 'log', kind: 'text', cmd: `${GIT} log --format='--- %H%n%B' ${BASE}..${authorEnd || 'HEAD'}` })
+  }
+  if (authorEnd) sections.push({ name: 'loopCommits', kind: 'list', cmd: `${GIT} rev-list ${authorEnd}..HEAD` })
+  return sections
+}
 
 // The state's log is a sequence of "--- <sha>" markers, each followed by
 // that commit's message.
@@ -186,18 +196,15 @@ function parseLog(log) {
 }
 
 // The intent every agent of the round reads: the user's note, then the
-// branch's commit messages verbatim, with the commits earlier rounds of this
-// loop (or of the dead run it relaunches) made set apart so a restore the
+// author's commit messages verbatim, then the commits earlier rounds of this
+// loop (or of the dead run it relaunches) made, set apart so a restore the
 // review itself committed never reads as the author's decision.
-function buildIntent(log, loopCommits) {
-  const reviewShas = new Set([...allFixes.map((f) => f.sha).filter(Boolean), ...(loopCommits || [])])
-  const commits = parseLog(log)
-  const authored = commits.filter((c) => !reviewShas.has(c.sha))
-  const mine = commits.filter((c) => reviewShas.has(c.sha))
+function buildIntent(authorLog, loopCommits) {
+  const authored = parseLog(authorLog)
   const parts = []
   if (INTENT_NOTE) parts.push(INTENT_NOTE)
   if (authored.length) parts.push(authored.map((c) => `--- ${c.sha.slice(0, 9)}\n${c.message}`).join('\n'))
-  if (mine.length) parts.push(`Commits ${mine.map((c) => c.sha.slice(0, 9)).join(', ')} were made by an earlier round of this review loop, not by the author; they carry none of the author's decisions.`)
+  if (loopCommits && loopCommits.length) parts.push(`Commits ${loopCommits.map((sha) => sha.slice(0, 9)).join(', ')} were made by an earlier round of this review loop, not by the author; they carry none of the author's decisions.`)
   return parts.length ? parts.join('\n\n') : null
 }
 
@@ -275,26 +282,112 @@ function prepareSections() {
 // empty pruneFiles its own command had just printed two paths for. So the
 // agent copies one block of output and the script splits it on marker lines.
 const MARKER = '::merge-ready::'
+// The harness swaps a Bash result over about 30 KB for a pointer to a file,
+// which the agent then pages through and reassembles by hand; a 90 KB log
+// copied that way came back with 34 commits missing and passed every marker
+// check. So the command writes its output to a file and the agents copy it
+// in chunks that each fit one Bash result, each checked against its cksum.
+const CHUNK_BYTES = 20000
+
+const COPY_RULE = `Return its entire output verbatim as \`output\`: every line, including the \`${MARKER}\` lines, in order, nothing added or removed. Do not read, review or edit any project file.`
 
 function copyPrompt(sections) {
   const body = sections.map((sec) => `echo '${MARKER} ${sec.name}'\n${sec.cmd}`).join('\n')
+  const ranges = `awk -v max=${CHUNK_BYTES} '{ l = length($0) + 1; if (n && b + l > max) { print s, NR - 1; n = 0; b = 0 } if (!n) s = NR; n++; b += l } END { if (n) print s, NR }' "$f"`
   return `Repository: ${ROOT}. Run exactly this shell command via Bash, unmodified, as a single call:
 
-cd ${shellQuote(ROOT)} && (
+cd ${shellQuote(ROOT)} && f=$(mktemp) && (
 ${body}
 echo '${MARKER} end'
-)
+) > "$f" && r=$(${ranges}) && echo "${MARKER}file $f" && echo "$r" | while read -r s e; do echo "${MARKER}chunk $s $e $(sed -n "$s,\${e}p" "$f" | cksum)"; done && sed -n "$(echo "$r" | head -n 1 | tr ' ' ',')p" "$f"
 
-Return its entire output verbatim as \`output\`: every line, including the \`${MARKER}\` marker lines, in order, nothing added or removed. Do not read, review or edit any project file.`
+${COPY_RULE}`
+}
+
+function chunkPrompt(file, chunk) {
+  return `Run exactly this shell command via Bash, unmodified, as a single call:
+
+sed -n '${chunk.start},${chunk.end}p' ${shellQuote(file)}
+
+${COPY_RULE}`
+}
+
+// The first copy carries the file path, one line per chunk with its line range
+// and cksum, then the first chunk itself.
+function parseHead(output) {
+  const lines = String(output || '').split('\n').map((l) => l.replace(/\r$/, ''))
+  let file = null
+  const chunks = []
+  let i = 0
+  for (; i < lines.length; i++) {
+    const f = new RegExp(`^${MARKER}file (\\S+)\\s*$`).exec(lines[i])
+    const c = new RegExp(`^${MARKER}chunk (\\d+) (\\d+) (\\d+) (\\d+)\\s*$`).exec(lines[i])
+    if (f) file = f[1]
+    else if (c) chunks.push({ start: +c[1], end: +c[2], crc: +c[3], bytes: +c[4] })
+    else if (file) break
+  }
+  if (!file || !chunks.length || chunks.some((c, k) => c.start !== (k ? chunks[k - 1].end + 1 : 1) || c.end < c.start)) return null
+  const first = verifyChunk(lines.slice(i).join('\n'), chunks[0])
+  return first ? { file, chunks, first } : null
+}
+
+// A chunk's lines, or null unless they are byte for byte the ones sed printed.
+// A missing trailing blank line is restored, and the copy is tried again
+// without the code fence lines an agent may wrap it in; the check decides
+// which reading is right, since a commit message can hold a fence of its own.
+function verifyChunk(text, chunk) {
+  const lines = String(text || '').split('\n').map((l) => l.replace(/\r$/, ''))
+  const fence = (l) => /^\s*```\S*\s*$/.test(l)
+  const bare = lines.slice(fence(lines[0] || '') ? 1 : 0)
+  while (bare.length && bare[bare.length - 1] === '') bare.pop()
+  if (bare.length && fence(bare[bare.length - 1])) bare.pop()
+  const n = chunk.end - chunk.start + 1
+  for (const candidate of [lines, bare]) {
+    const c = candidate.slice()
+    while (c.length > n && c[c.length - 1] === '') c.pop()
+    while (c.length < n) c.push('')
+    if (c.length !== n) continue
+    const bytes = utf8(c.map((l) => `${l}\n`).join(''))
+    if (bytes.length === chunk.bytes && cksum(bytes) === chunk.crc) return c
+  }
+  return null
+}
+
+// POSIX cksum: CRC-32 with polynomial 0x04C11DB7, MSB first, over the bytes
+// and then the byte count, inverted.
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n << 24
+  for (let k = 0; k < 8; k++) c = c & 0x80000000 ? (c << 1) ^ 0x04c11db7 : c << 1
+  return c >>> 0
+})
+
+function cksum(bytes) {
+  let crc = 0
+  const step = (b) => { crc = ((crc << 8) ^ CRC_TABLE[((crc >>> 24) ^ b) & 0xff]) >>> 0 }
+  for (const b of bytes) step(b)
+  for (let n = bytes.length; n > 0; n = Math.floor(n / 256)) step(n & 0xff)
+  return ~crc >>> 0
+}
+
+function utf8(s) {
+  const out = []
+  for (const ch of s) {
+    const c = ch.codePointAt(0)
+    if (c < 0x80) out.push(c)
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63))
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+  }
+  return out
 }
 
 // Returns null when the output is not one complete run of the command: a
 // missing section or end marker, or a hash section without a hash, means lines
 // were lost.
-function parseCopy(output, sections) {
+function parseCopy(lines, sections) {
   const raw = {}
   let current = null
-  for (const line of String(output || '').split('\n')) {
+  for (const line of lines) {
     const marker = new RegExp(`^\\s*${MARKER} (\\w+)\\s*$`).exec(line)
     if (marker) {
       current = marker[1]
@@ -310,8 +403,8 @@ function parseCopy(output, sections) {
     if (!lines) return null
     if (sec.kind === 'text') {
       value[sec.name] = lines.map((l) => l.trimEnd()).join('\n').trim()
-    } else if (sec.kind === 'hash') {
-      const hash = /^\s*([0-9a-f]{64})\b/.exec(lines.find((l) => l.trim()) || '')
+    } else if (sec.kind === 'hash' || sec.kind === 'commit') {
+      const hash = (sec.kind === 'hash' ? /^\s*([0-9a-f]{64})\b/ : /^\s*([0-9a-f]{40})\b/).exec(lines.find((l) => l.trim()) || '')
       if (!hash) return null
       value[sec.name] = hash[1]
     } else {
@@ -321,15 +414,26 @@ function parseCopy(output, sections) {
   return value
 }
 
-// An output that fails to parse is retried once; the second failure ends the
-// step.
+// The first copy runs the command; the chunks past the first are copied in
+// parallel from the file it wrote. A copy that fails its check is retried
+// once; the second failure ends the step.
 async function runCopy(sections, label, phase, opts) {
-  const prompt = copyPrompt(sections)
+  const head = await copyAttempts(copyPrompt(sections), label, phase, opts, parseHead)
+  if (!head.value) return head
+  const rest = await parallel(head.value.chunks.slice(1).map((chunk, k) => () =>
+    copyAttempts(chunkPrompt(head.value.file, chunk), `${label} part ${k + 2}`, phase, opts, (out) => verifyChunk(out, chunk))))
+  const failed = rest.findIndex((r) => !r || !r.value)
+  if (failed >= 0) return { value: null, error: rest[failed] ? rest[failed].error : `the ${label} part ${failed + 2} copy threw` }
+  const value = parseCopy([...head.value.first, ...rest.flatMap((r) => r.value)], sections)
+  return value ? { value, error: null } : { value: null, error: `the ${label} output lacks a section marker` }
+}
+
+async function copyAttempts(prompt, label, phase, opts, parse) {
   let dead = 0
   for (let attempt = 1; attempt <= 2; attempt++) {
     const r = await run(prompt, { label: `${label}.${attempt}`, phase, schema: COPY_SCHEMA, ...opts })
     if (!r) dead++
-    const value = r ? parseCopy(r.output, sections) : null
+    const value = r ? parse(r.output) : null
     if (value) return { value, error: null }
   }
   return {
@@ -412,16 +516,22 @@ const allUncommittedFixFiles = new Set()
 const allPossiblyDirty = new Set()
 let stopReason = null
 let stopDetail = null
+let authorEnd = LOOP_START
+let authorLog = null
 
 log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_ROUNDS} review round(s), scout and implementers on ${MODEL || 'the session model'}, simplify afterwards`)
 
 for (let round = 1; round <= MAX_ROUNDS; round++) {
   phase('Scout')
-  const { value: state, error: stateError } = await runCopy(STATE_SECTIONS, `state @${round}`, 'Scout', STATE_OPTS)
+  const { value: state, error: stateError } = await runCopy(stateSections(round, authorEnd), `state @${round}`, 'Scout', STATE_OPTS)
   if (!state) {
     stopReason = 'agent-failed'
     stopDetail = `round ${round}: ${stateError}`
     break
+  }
+  if (round === 1) {
+    authorEnd = authorEnd || state.head || null
+    authorLog = state.log || null
   }
   const inScope = [...new Set([...state.tracked, ...state.untracked])]
   if (inScope.length === 0) {
@@ -429,7 +539,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     stopDetail = `round ${round} found nothing in scope`
     break
   }
-  const intent = buildIntent(state.log, state.loopCommits)
+  const intent = buildIntent(authorLog, state.loopCommits)
   const scout = await run(scoutPrompt(state, inScope, intent), { label: `scout @${round}`, phase: 'Scout', schema: DIMENSIONS_SCHEMA, ...SCOUT_OPTS })
   if (!scout) {
     stopReason = 'agent-failed'
