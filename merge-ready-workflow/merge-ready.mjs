@@ -2,7 +2,7 @@ export const meta = {
   name: 'merge-ready',
   description: 'Repeat the adversarial code review over a scope, re-scouting the finders each round, until a round fixes nothing medium or higher that changes production behaviour and fewer than half its finders reported a medium-or-higher fix; then simplify the same scope',
   phases: [
-    { title: 'Prepare', detail: 'Sonnet runs the commands listing the files in scope, the untracked files and the dirty paths at launch', model: 'sonnet' },
+    { title: 'Prepare', detail: 'Sonnet runs the commands listing the files in scope, the untracked files and the dirty paths at launch, unless args carry them', model: 'sonnet' },
     { title: 'Scout', detail: 'the session model (or args.model) at medium effort designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
     { title: 'Triage', detail: 'Opus classifies each fixed medium-or-higher finding by the kinds of change in its hunks; a production kind means another round', model: 'opus' },
@@ -51,6 +51,14 @@ for (const key of ['checks', 'checkCmd', 'excludePattern', 'model', 'intent']) {
   if (input[key] !== undefined && (typeof input[key] !== 'string' || !input[key].trim())) {
     throw new Error(`args.${key}: a non-empty string when given; omit it otherwise`)
   }
+}
+// A short diff-bounded scope's session passes the three lists, which cost it
+// less than the copy agents; a codebase or long scope omits them.
+const LIST_KEYS = ['files', 'untracked', 'dirtyAtLaunch']
+const listsGiven = LIST_KEYS.filter((key) => input[key] !== undefined)
+if (listsGiven.length && (listsGiven.length < LIST_KEYS.length
+  || LIST_KEYS.some((key) => !Array.isArray(input[key]) || input[key].some((p) => typeof p !== 'string')))) {
+  throw new Error('args.files, args.untracked and args.dirtyAtLaunch: pass all three as string[] or omit all three to have the workflow list them')
 }
 if (input.scope === 'codebase'
   ? input.loopStart !== undefined
@@ -248,8 +256,8 @@ ${blocks}`
 
 // ---------- the launch state, computed here ----------
 
-// The launching session names the scope; the lists are read here, so a scope
-// of thousands of files never passes through its context. Nothing but this
+// When the args omit the lists they are read here, so a scope of thousands of
+// files never passes through the launching session's context. Nothing but this
 // loop's implementers writes to the tree between rounds (a cleanup that cannot
 // restore it stops the loop), so every later round's state is this one plus
 // what the fixes so far touched.
@@ -502,7 +510,10 @@ const excludedKindsTable = {}
 log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_ROUNDS} review round(s), scout and implementers on ${MODEL || 'the session model'}, simplify afterwards`)
 
 phase('Prepare')
-const { value: launch, error: prepareError } = await runCopy(PREPARE_SECTIONS, 'the file lists the review loop starts from', 'prepare', 'Prepare', PREPARE_OPTS)
+const sortedPaths = (paths) => [...new Set(paths.map((p) => p.trim()).filter(Boolean))].sort()
+const { value: launch, error: prepareError } = listsGiven.length
+  ? { value: { files: sortedPaths(input.files), untracked: sortedPaths(input.untracked), dirty: sortedPaths(input.dirtyAtLaunch) }, error: null }
+  : await runCopy(PREPARE_SECTIONS, 'the file lists the review loop starts from', 'prepare', 'Prepare', PREPARE_OPTS)
 if (!launch) {
   stopReason = 'prepare-failed'
   stopDetail = prepareError

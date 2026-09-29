@@ -17,7 +17,14 @@ One Workflow runs adversarial review rounds, each with freshly scouted finder di
    - `unpushed`: `git merge-base HEAD @{upstream}`. If the branch has no upstream (`git rev-parse @{upstream}` fails), ask the user which remote ref bounds the unpushed work and stop.
    - `codebase`: none; omitted from the args.
 
-   Set `loopStart` to `git rev-parse HEAD`, omitted for `codebase`. The author's commits are `<BASE>..loopStart`; every commit after it is the loop's. The workflow lists the files in scope, the untracked and the dirty paths itself.
+   Set `loopStart` to `git rev-parse HEAD`, omitted for `codebase`. The author's commits are `<BASE>..loopStart`; every commit after it is the loop's.
+
+   For a diff-bounded scope, count the paths first, via Bash from the project root: `git diff --name-only <BASE> | wc -l` and `git ls-files -o --exclude-standard | wc -l`. If together they are 200 or fewer, list them for the launch, with `git -c core.quotePath=false`, since passing them costs less than the agents the workflow would spend listing them:
+   - `files`: `git diff --name-only <BASE>`.
+   - `untracked`: `git ls-files -o --exclude-standard`.
+   - `dirtyAtLaunch`: `git diff --name-only --no-renames HEAD` plus the untracked paths.
+
+   For `codebase`, or more than 200 paths, list nothing: the workflow lists them itself.
 
 2. **Locate the three scripts.** [merge-ready.mjs](merge-ready.mjs) sits next to this SKILL.md, in the directory named by the `Base directory for this skill:` line of this skill's invocation. `review.mjs` sits in the `adversarial-review-workflow` skill folder and `simplify.mjs` in the `simplify-workflow` skill folder: look for each as a sibling of this skill's folder first, then in the skills directory that holds this skill (e.g. `~/.claude/skills/<name>/`). Resolve all three to absolute paths, following symlinks (`readlink -f`). If either sibling script is missing, tell the user which skill to install and stop.
 
@@ -36,11 +43,11 @@ One Workflow runs adversarial review rounds, each with freshly scouted finder di
    ```
    Workflow({
      scriptPath: "<absolute path to merge-ready.mjs>",
-     args: { scope: "<scope>", root: "<absolute project root>", base: "<commit, omitted for codebase>", reviewScript: "<absolute path to review.mjs>", simplifyScript: "<absolute path to simplify.mjs>", context: "<project description>", loopStart: "<HEAD at launch, or the start of a dead earlier run; omitted for codebase>", intent: "<the author's note, omitted when none>", checks: "<check commands, omitted when none found>", checkCmd: "<single check command, omitted when none found>", pruneExts: [<extensions>], excludePattern: "<regex, omitted to keep the default>", model: "<model argument, omitted when not given>" }
+     args: { scope: "<scope>", root: "<absolute project root>", base: "<commit, omitted for codebase>", reviewScript: "<absolute path to review.mjs>", simplifyScript: "<absolute path to simplify.mjs>", context: "<project description>", files: [<paths>], untracked: [<paths>], dirtyAtLaunch: [<paths>], loopStart: "<HEAD at launch, or the start of a dead earlier run; omitted for codebase>", intent: "<the author's note, omitted when none>", checks: "<check commands, omitted when none found>", checkCmd: "<single check command, omitted when none found>", pruneExts: [<extensions>], excludePattern: "<regex, omitted to keep the default>", model: "<model argument, omitted when not given>" }
    })
    ```
 
-   Pass `pruneExts` as a real JSON array. The script validates the args and throws on a missing one.
+   Pass `files`, `untracked` and `dirtyAtLaunch` all three or none: omit them when step 1 listed nothing, and pass `[]` for an empty list otherwise. Pass them and `pruneExts` as real JSON arrays. The script validates the args and throws on a missing one.
 
    **If the run dies** (a session limit, a killed task), never resume it with `resumeFromRunId`, whatever the harness suggests; relaunch it by [RELAUNCH.md](RELAUNCH.md) in this skill's folder.
 
