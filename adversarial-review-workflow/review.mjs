@@ -4,11 +4,11 @@ export const meta = {
   phases: [
     { title: 'Prepare', detail: 'Sonnet lists the untracked and the dirty paths at launch, unless args carry them', model: 'sonnet' },
     { title: 'Find', detail: 'one finder per dimension: Opus at medium effort for production code, Sonnet at high effort for a dimension with production=false', model: 'opus' },
-    { title: 'Dedup', detail: 'Sonnet intake check against the registered findings in the same file', model: 'sonnet' },
+    { title: 'Dedup', detail: 'Sonnet intake check against the registered findings in the same file, serialized per file', model: 'sonnet' },
     { title: 'Verify', detail: 'Sonnet materiality skeptic, then Sonnet technical skeptic; their verdicts gate the finding and grade the report, never what the implementer reads', model: 'sonnet' },
     { title: 'Cluster', detail: 'group confirmed findings by root cause', model: 'opus' },
     { title: 'Implement', detail: 'one implementer per cluster (the session model unless args.implementerModel overrides), strictly sequential, commits its own fix' },
-    { title: 'Cover', detail: 'Opus check whether a cluster fix also closes its siblings', model: 'opus' },
+    { title: 'Cover', detail: 'Opus check whether a cluster fix also closes its siblings, all of a cluster\'s siblings at once', model: 'opus' },
     { title: 'Cleanup', detail: 'Sonnet tree restore after a dead implementer', model: 'sonnet' },
   ],
 }
@@ -680,10 +680,11 @@ const registry = []
 let nextId = 1
 const verifications = []
 const finderFailures = []
-// Dedup runs serialized so two candidates arriving at once cannot both be
-// registered as primaries; verification runs concurrently as soon as a
-// finding is registered.
-let dedupChain = Promise.resolve()
+// Dedup runs serialized per file, the only findings it compares, so two
+// candidates arriving at once in one file cannot both be registered as
+// primaries while other files' findings go on; verification runs concurrently
+// as soon as a finding is registered.
+const dedupChains = new Map()
 
 function byId(id) {
   return registry.find((e) => e.id === id)
@@ -745,7 +746,7 @@ async function verify(e) {
 }
 
 function registerAndVerify(f, dim) {
-  const p = dedupChain.then(async () => {
+  const p = (dedupChains.get(f.file) || Promise.resolve()).then(async () => {
     let dupOf = null
     const sameFile = registry.filter((c) => c.file === f.file)
     if (sameFile.length > 0) {
@@ -777,7 +778,7 @@ function registerAndVerify(f, dim) {
     log(`registered #${entry.id} [${entry.severity}] ${entry.title} (${dim})`)
     verifications.push(verify(entry))
   })
-  dedupChain = p.catch(() => undefined)
+  dedupChains.set(f.file, p.catch(() => undefined))
   return p
 }
 
@@ -803,9 +804,9 @@ await parallel(DIMENSIONS.map((d) => async () => {
   }
   const list = res.findings.filter((f) => f && f.title && f.file)
   log(`finder ${d.key}: ${list.length} finding(s)`)
-  for (const f of list) await registerAndVerify(f, d.key)
+  await Promise.all(list.map((f) => registerAndVerify(f, d.key).catch(() => undefined)))
 }))
-await dedupChain
+await Promise.all(dedupChains.values())
 await Promise.all(verifications)
 
 const confirmed = registry.filter((e) => e.status === 'confirmed')
@@ -896,16 +897,19 @@ if (clusters.length > 0) {
     const lead = byId(cl.leadId)
     const siblings = cl.memberIds.filter((id) => id !== cl.leadId).map(byId)
     await implement(lead, siblings)
-    for (const s of siblings) {
-      if (lead.outcome === 'fixed') {
-        const fix = priorFixes.find((p) => p.id === lead.id)
-        const check = await run(siblingPrompt(s, lead, fix), { label: `sibling #${s.id} vs fix #${lead.id}`, phase: 'Cover', schema: SIBLING_SCHEMA, ...SIBLING_OPTS })
-        if (check && check.covered) {
-          s.outcome = 'covered'
-          s.coveredBy = lead.id
-          log(`#${s.id} covered by the fix for #${lead.id}`)
-          continue
-        }
+    // The sibling checks read only the lead's fix, so they run together; a
+    // sibling an earlier sibling's fix happens to close returns covered from
+    // its own implementer.
+    const fix = lead.outcome === 'fixed' ? priorFixes.find((p) => p.id === lead.id) : null
+    const checks = fix
+      ? await parallel(siblings.map((s) => () => run(siblingPrompt(s, lead, fix), { label: `sibling #${s.id} vs fix #${lead.id}`, phase: 'Cover', schema: SIBLING_SCHEMA, ...SIBLING_OPTS })))
+      : []
+    for (const [k, s] of siblings.entries()) {
+      if (checks[k] && checks[k].covered) {
+        s.outcome = 'covered'
+        s.coveredBy = lead.id
+        log(`#${s.id} covered by the fix for #${lead.id}`)
+        continue
       }
       await implement(s, [])
     }

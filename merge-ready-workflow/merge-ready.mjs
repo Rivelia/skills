@@ -5,7 +5,7 @@ export const meta = {
     { title: 'Prepare', detail: 'Sonnet runs the commands listing the files in scope, the untracked files and the dirty paths at launch, unless args carry them', model: 'sonnet' },
     { title: 'Scout', detail: 'the session model (or args.model) at medium effort designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
-    { title: 'Triage', detail: 'Opus classifies each fixed medium-or-higher finding by the kinds of change in its hunks; a production kind means another round', model: 'opus' },
+    { title: 'Triage', detail: 'Opus classifies each fixed medium-or-higher finding by the kinds of change in its hunks; a production kind means another round; runs beside the next round when the finders already justify one, beside the next scout otherwise', model: 'opus' },
     { title: 'Simplify', detail: 'the simplify-converge workflow (simplify.mjs) over the same scope, which computes its own file lists' },
   ],
 }
@@ -523,23 +523,54 @@ if (!launch) {
   log(`the launch state could not be read: ${prepareError}`)
 }
 
-for (let round = 1; launch && round <= MAX_ROUNDS; round++) {
-  phase('Scout')
-  const dirtyAtLaunch = [...new Set([...launch.dirty, ...allUncommittedFixFiles])].sort()
+// A round's scout reads the scope as the fixes so far left it, so the next
+// round's scout can start as soon as a review returns.
+async function scoutRound(round) {
   const untracked = launch.untracked
   const inScope = [...new Set([...launch.files, ...untracked, ...allFixes.flatMap((f) => f.files || [])])].sort()
-  if (inScope.length === 0) {
-    stopReason = 'scope-empty'
-    stopDetail = `round ${round} found nothing in scope`
-    break
-  }
+  if (inScope.length === 0) return { stop: 'scope-empty', detail: `round ${round} found nothing in scope` }
   const scout = await run(scoutPrompt(inScope, new Set(untracked)), { label: `scout @${round}`, phase: 'Scout', schema: DIMENSIONS_SCHEMA, ...SCOUT_OPTS })
-  if (!scout) {
-    stopReason = 'agent-failed'
-    stopDetail = `the scout of round ${round} died`
+  if (!scout) return { stop: 'agent-failed', detail: `the scout of round ${round} died` }
+  return { stop: null, ...normalizeDimensions(scout.dimensions, inScope) }
+}
+
+async function runTriage(round, candidates, findings) {
+  const triage = { failed: false, productionIds: [] }
+  if (!candidates.length) return triage
+  const t = await run(triagePrompt(round, candidates, findings), { label: `triage @${round}`, phase: 'Triage', schema: TRIAGE_SCHEMA, ...TRIAGE_OPTS })
+  if (!t) {
+    triage.failed = true
+    triage.productionIds = candidates.map((f) => f.id)
+    log(`round ${round}: the triage agent died; every medium-or-higher fix is assumed to have changed production behaviour`)
+  } else {
+    const isProduction = (v) => v.kinds.some((k) => CHANGE_KINDS[k] && CHANGE_KINDS[k].production)
+    triage.productionIds = t.verdicts
+      .filter((v) => candidates.some((f) => f.id === v.id) && isProduction(v))
+      .map((v) => v.id)
+  }
+  return triage
+}
+
+// The triage only reads (a committed fix by its sha, an uncommitted one from
+// its pasted hunks), so it never holds up the loop when the finders alone
+// already justify another round: it runs beside the next round and fills in
+// its entry for the report. When only the triage can decide, the next round's
+// scout runs beside it, and is discarded when the loop converges.
+const backgroundTriages = []
+let nextScout = null
+
+for (let round = 1; launch && round <= MAX_ROUNDS; round++) {
+  phase('Scout')
+  const scouted = await (nextScout || scoutRound(round))
+  nextScout = null
+  if (scouted.stop) {
+    stopReason = scouted.stop
+    stopDetail = scouted.detail
     break
   }
-  const { dimensions, missing } = normalizeDimensions(scout.dimensions, inScope)
+  const { dimensions, missing } = scouted
+  const dirtyAtLaunch = [...new Set([...launch.dirty, ...allUncommittedFixFiles])].sort()
+  const untracked = launch.untracked
   if (missing.length) log(`round ${round}: the scout left ${missing.length} file(s) out of every dimension; a catch-all finder takes them`)
 
   phase('Review')
@@ -600,22 +631,22 @@ for (let round = 1; launch && round <= MAX_ROUNDS; round++) {
     productiveFinders: productiveFinders.size,
   }
 
-  const triage = { failed: false, productionIds: [] }
-  if (candidates.length) {
-    phase('Triage')
-    const t = await run(triagePrompt(round, candidates, findings), { label: `triage @${round}`, phase: 'Triage', schema: TRIAGE_SCHEMA, ...TRIAGE_OPTS })
-    if (!t) {
-      triage.failed = true
-      triage.productionIds = candidates.map((f) => f.id)
-      log(`round ${round}: the triage agent died; every medium-or-higher fix is assumed to have changed production behaviour`)
-    } else {
-      const isProduction = (v) => v.kinds.some((k) => CHANGE_KINDS[k] && CHANGE_KINDS[k].production)
-      triage.productionIds = t.verdicts
-        .filter((v) => candidates.some((f) => f.id === v.id) && isProduction(v))
-        .map((v) => v.id)
-    }
+  const reasons = []
+  if (productiveFinders.size * 2 >= dimensions.length) {
+    reasons.push(`${productiveFinders.size} of ${dimensions.length} finder(s) reported a medium-or-higher issue that was fixed or covered (${[...productiveFinders].join(', ')})`)
   }
-  entry.triage = triage
+  if (counts.finderFailures) {
+    reasons.push(`finder(s) ${review.finderFailures.join(', ')} failed, so their dimension was never reviewed`)
+  }
+  entry.decision = { counts, reasons }
+  // The triage reads the findings as review.mjs returned them; the entry's
+  // trimmed copy below is a separate object.
+  const triaged = runTriage(round, candidates, findings).then((triage) => {
+    entry.triage = triage
+    if (triage.productionIds.length) {
+      reasons.unshift(`${triage.productionIds.length} medium-or-higher fix(es) changed production behaviour (#${triage.productionIds.join(', #')})`)
+    }
+  })
   // The result lands in the launching session whole, every round of it, so
   // what the report never reads leaves once the loop and the triage have read
   // it: the hunks, the finder a finding came from, a committed fix's files (its
@@ -630,25 +661,20 @@ for (let round = 1; launch && round <= MAX_ROUNDS; round++) {
     }),
   }
 
-  const reasons = []
-  if (triage.productionIds.length) {
-    reasons.push(`${triage.productionIds.length} medium-or-higher fix(es) changed production behaviour (#${triage.productionIds.join(', #')})`)
-  }
-  if (productiveFinders.size * 2 >= dimensions.length) {
-    reasons.push(`${productiveFinders.size} of ${dimensions.length} finder(s) reported a medium-or-higher issue that was fixed or covered (${[...productiveFinders].join(', ')})`)
-  }
-  if (counts.finderFailures) {
-    reasons.push(`finder(s) ${review.finderFailures.join(', ')} failed, so their dimension was never reviewed`)
-  }
-  const blocked = (review.possiblyDirty || []).length > 0
-  entry.decision = { counts, reasons }
-
-  if (blocked) {
+  if ((review.possiblyDirty || []).length > 0) {
+    await triaged
     stopReason = 'possibly-dirty'
     stopDetail = `round ${round}: an implementer died and the cleanup could not restore ${review.possiblyDirty.join(', ')}`
     log(`round ${round}: stopping, the tree may hold partial hunks in protected paths`)
     break
   }
+  if (reasons.length) {
+    backgroundTriages.push(triaged)
+    log(`round ${round}: ${resolved} issue(s) resolved by ${counts.finders} finder(s); another round because ${reasons.join('; ')}${candidates.length ? '; the triage runs beside it' : ''}`)
+    continue
+  }
+  if (round < MAX_ROUNDS) nextScout = scoutRound(round + 1)
+  await triaged
   if (reasons.length === 0) {
     stopReason = 'converged'
     log(`round ${round}: ${resolved} issue(s) resolved, ${counts.resolvedMediumOrHigher} of them medium or higher from ${counts.productiveFinders} of ${counts.finders} finder(s), none of those in production code; the review loop is done`)
@@ -685,6 +711,9 @@ if (stopReason !== 'converged') {
     simplify = { ran: true, skipped: null, error: null, result }
   }
 }
+
+// A discarded scout only reads, so it may finish beside the simplify phase.
+await Promise.all([...backgroundTriages, nextScout])
 
 log(`done: ${rounds.length} review round(s), stop reason ${stopReason}, ${allFixes.length} fix(es) in total, simplify ${simplify.ran ? 'ran' : `skipped (${simplify.skipped})`}`)
 

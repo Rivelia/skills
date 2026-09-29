@@ -8,7 +8,7 @@ export const meta = {
     { title: 'Apply', detail: 'implement the approved findings per batch' },
     { title: 'Hash', detail: 'deterministic tree hash after each round an applier ran in, and each prune pass', model: 'sonnet' },
     { title: 'Discover', detail: 'list untracked files the appliers did not declare', model: 'sonnet' },
-    { title: 'Verify', detail: 'project check command: baseline on sonnet, then an opus fix-up agent after each editing phase', model: 'opus' },
+    { title: 'Verify', detail: 'project check command: baseline on sonnet beside the first round\'s finders and judges, then an opus fix-up agent after each editing phase', model: 'opus' },
     { title: 'Prune', detail: 'audit and delete non-useful comments per file batch', model: 'opus' },
   ],
 }
@@ -636,7 +636,11 @@ let checkDisabled = false
 // the verification never reached, so each phase also reports how its own
 // verification ended.
 let simplifyVerification = input.checkCmd ? 'no-changes' : 'not-configured'
-if (input.checkCmd) {
+// The baseline runs alongside the first round's finders and judges, which only
+// read; the first applier waits for it, and every round's end awaits it before
+// hashing, so it still sees the tree Prepare hashed.
+const baselineReady = (async () => {
+  if (!input.checkCmd) return
   let baseline = null
   for (let attempt = 1; attempt <= 3 && !baseline; attempt++) {
     baseline = await runCheck(`check:baseline.${attempt}`)
@@ -654,7 +658,7 @@ if (input.checkCmd) {
         : 'baseline check already failing but named no file; no check failure will be attributed to this run')
     }
   }
-}
+})()
 
 // The fix-up agent runs alone at a quiet point, so unlike the loop agents it
 // may run the project check itself, repeatedly, until it passes.
@@ -919,14 +923,15 @@ while (true) {
       roundDispatched = true
       batch.applierDispatched = true
       for (const file of approved.flatMap(f => f.files ?? [])) possiblyEditedFiles.add(file)
-      return agent(applyPrompt(approved), {
+      return baselineReady.then(() => agent(applyPrompt(approved), {
         label: `apply:${batch.name}@${iterations}`,
         phase: 'Apply',
         schema: APPLY_SCHEMA,
         ...applyOpts,
-      }).then(r => ({ status: 'applied', proposed: prev.findings.length, approved: approved.length, rejected, report: r }))
+      })).then(r => ({ status: 'applied', proposed: prev.findings.length, approved: approved.length, rejected, report: r }))
     },
   )
+  await baselineReady
 
   const newFiles = []
   const revived = new Set()
@@ -1045,6 +1050,7 @@ while (true) {
 // a run that ended with no hash at all has to fall back on an applier having
 // been dispatched. It runs before the fix-up so undeclared files reach both the
 // fix-up and the prune phase.
+await baselineReady
 const treeMoved = globalSeen.size > 1 || (treeEdited && stopReason === 'hash-unavailable')
 let undeclaredFiles = []
 if (treeMoved) {
