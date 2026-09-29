@@ -5,8 +5,7 @@ export const meta = {
     { title: 'Scout', detail: 'the session model (or args.model) at medium effort designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
     { title: 'Triage', detail: 'Opus classifies each fixed medium-or-higher finding by the kinds of change in its hunks; a production kind means another round', model: 'opus' },
-    { title: 'Prepare', detail: 'Sonnet computes the simplify inputs: file list, prune candidates, untracked baseline, tree hash', model: 'sonnet' },
-    { title: 'Simplify', detail: 'the simplify-converge workflow (simplify.mjs) over the same scope' },
+    { title: 'Simplify', detail: 'the simplify-converge workflow (simplify.mjs) over the same scope, which computes its own file lists' },
   ],
 }
 
@@ -26,8 +25,6 @@ const COUNTED = ['medium', 'high', 'critical']
 // justify another. Each round spends a few dozen agents and the simplify
 // phase spends more, all against the harness's 1000-agent lifetime cap.
 const MAX_ROUNDS = 25
-// Quoted in SKILL.md step 3 so the launching session never opens this script to learn it.
-const DEFAULT_EXCLUDE = '(^|/)(node_modules|vendor|third_party|dist|build|target|generated)/|\\.min\\.|(^|/)(package-lock\\.json|yarn\\.lock|pnpm-lock\\.yaml|Cargo\\.lock|poetry\\.lock|go\\.sum)$|\\.(json|jsonl|csv|tsv|md|mdx|lock|snap|svg|png|jpe?g|gif|ico|webp|pdf|woff2?|ttf|otf|eot|zip|gz|wasm|so|dylib|dll|exe|bin)$'
 
 const input = typeof args === 'string' ? JSON.parse(args) : args
 
@@ -71,18 +68,16 @@ const BASE = input.base || null
 const SCOPE = input.scope
 const CHECKS = input.checks ? input.checks.trim() : null
 const CHECK_CMD = input.checkCmd ? input.checkCmd.trim() : null
-const EXCLUDE = input.excludePattern ? input.excludePattern.trim() : DEFAULT_EXCLUDE
 // The author's note on what the diff deliberately does, when the user gave one;
 // the agents read the author's commit messages themselves, up to loopStart.
 const INTENT_NOTE = input.intent ? input.intent.trim() : null
 // The model argument replaces the session model wherever that is the default: the scout
 // here, the review implementers, the simplify appliers. Every other agent keeps its model.
 const MODEL = input.model ? input.model.trim() : undefined
-const PRUNE_EXTS = input.pruneExts.map((e) => (e.startsWith('.') ? e : `.${e}`))
 
 const SCOUT_OPTS = { ...(MODEL ? { model: MODEL } : {}), effort: 'medium' }
 const TRIAGE_OPTS = { model: 'opus', effort: 'medium' }
-const PREPARE_OPTS = { model: 'sonnet', effort: 'low' }
+
 // ---------- shared prompt fragments ----------
 
 const SCOPE_LABEL = {
@@ -102,22 +97,29 @@ ${SCOPE_TEXT}`
 
 const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit, create or delete files under ${ROOT}, and run no git command that changes state (no checkout, restore, stash, commit, reset, clean). Scratch files go in /tmp.`
 
-const GIT = 'git -c core.quotePath=false'
-const LIST_TRACKED_CMD = SCOPE === 'codebase' ? `${GIT} ls-files` : `${GIT} diff --name-only ${BASE}`
 // Where the author's commits end and the loop's begin: HEAD at launch, or the
 // commit a dead earlier run started from, so its fixes read as the loop's too.
 const LOOP_START = input.loopStart || null
 
-// ---------- schemas ----------
-
-const COPY_SCHEMA = {
-  type: 'object',
-  properties: {
-    output: { type: 'string', description: 'The command\'s output, verbatim.' },
-    declined: { type: 'string', description: 'Only when you did not run the command: why, in one sentence. Leave output empty then.' },
-  },
-  required: ['output'],
+// The vocabulary the triage judges each fix's hunks in. `production` marks the
+// kinds that change what shipped code does at runtime.
+const CHANGE_KINDS = {
+  logic: { production: true, text: 'a change to what shipped code does: application logic, data handling, queries, API handlers, UI behaviour; a helper local to the file it fixes is part of it' },
+  config: { production: true, text: 'configuration the running product reads' },
+  robustness: { production: true, text: 'a small guard or fallback with no user-visible effect today' },
+  rename: { production: false, text: 'a symbol renamed with every consumer updated and nothing else changed' },
+  'dead-code': { production: false, text: 'unreachable or unused code removed' },
+  types: { production: false, text: 'type annotations with no runtime effect' },
+  format: { production: false, text: 'formatting only' },
+  comment: { production: false, text: 'comments and docstrings' },
+  docs: { production: false, text: 'docs, agent docs, tool and prompt descriptions' },
+  copy: { production: false, text: 'user-facing copy, error message text and translations' },
+  'log-text': { production: false, text: 'log message text' },
+  test: { production: false, text: 'tests, fixtures and test helpers, added or updated' },
+  'ci-build': { production: false, text: 'existing CI or build configuration' },
 }
+
+// ---------- schemas ----------
 
 const DIMENSIONS_SCHEMA = {
   type: 'object',
@@ -139,33 +141,26 @@ const DIMENSIONS_SCHEMA = {
   required: ['dimensions'],
 }
 
-// The triage answers in the change kinds the review script's result carries,
-// the vocabulary its implementer reported in; the script reads production off
-// the same table.
-function triageSchema(changeKinds) {
-  return {
-    type: 'object',
-    properties: {
-      verdicts: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            id: { type: 'integer' },
-            kinds: { type: 'array', items: { type: 'string', enum: Object.keys(changeKinds) }, description: 'Every kind of change the fix\'s hunks contain, by key from the list in the prompt.' },
-            reason: { type: 'string', description: 'The hunk each production kind rests on, quoted; for a fix with no production kind, what its hunks are instead.' },
-          },
-          required: ['id', 'kinds', 'reason'],
+const TRIAGE_SCHEMA = {
+  type: 'object',
+  properties: {
+    verdicts: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'integer' },
+          kinds: { type: 'array', items: { type: 'string', enum: Object.keys(CHANGE_KINDS) }, description: 'Every kind of change the fix\'s hunks contain, by key from the list in the prompt.' },
+          reason: { type: 'string', description: 'The hunk each production kind rests on, quoted; for a fix with no production kind, what its hunks are instead.' },
         },
+        required: ['id', 'kinds', 'reason'],
       },
     },
-    required: ['verdicts'],
-  }
+  },
+  required: ['verdicts'],
 }
 
 // ---------- prompts ----------
-
-const PREPARE_WHAT = 'the file lists and tree hash the simplify pass starts from'
 
 // The scout reads the author's commit messages the way the review's agents
 // do: per path, never the whole range, since a branch or the commits earlier
@@ -210,8 +205,8 @@ function fixLocation(f) {
   return `left uncommitted in the working tree, files ${(f.files || []).join(', ') || '(unreported)'}`
 }
 
-function triagePrompt(round, candidates, findings, changeKinds) {
-  const kindList = Object.keys(changeKinds).map((k) => `- ${k}${changeKinds[k].production ? ' (production)' : ''}: ${changeKinds[k].text}`).join('\n')
+function triagePrompt(round, candidates, findings) {
+  const kindList = Object.keys(CHANGE_KINDS).map((k) => `- ${k}${CHANGE_KINDS[k].production ? ' (production)' : ''}: ${CHANGE_KINDS[k].text}`).join('\n')
   const blocks = candidates.map((c) => {
     const fixer = c.outcome === 'covered' && c.coveredBy != null ? findings.find((f) => f.id === c.coveredBy) : null
     const fix = fixer || c
@@ -229,210 +224,6 @@ ${kindList}
 A fix carries every kind its hunks contain: one that changed a comment and a query is comment and logic. Read each fix's hunks (from its commit, or pasted below for a fix left uncommitted), list a production kind only when a hunk changes what shipped code does, and quote that hunk in the reason. One verdict per finding id.
 
 ${blocks}`
-}
-
-function prepareSections() {
-  const extRe = `\\.(${PRUNE_EXTS.map((e) => e.slice(1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`
-  return [
-    { name: 'files', kind: 'list', cmd: `{ ${LIST_TRACKED_CMD}; ${GIT} ls-files -o --exclude-standard; } | sort -u | grep -vE '${EXCLUDE}' | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done || :` },
-    {
-      name: 'pruneFiles',
-      kind: 'list',
-      cmd: SCOPE === 'codebase'
-        ? `${GIT} ls-files | sort -u | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && grep -qE '(//|/\\*|<!--)' "$f" && echo "$f"; done || :`
-        : `${GIT} diff --name-only ${BASE} | sort -u | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && ${GIT} diff ${BASE} -- "$f" | grep -qE '^\\+.*(//|/\\*|<!--)' && echo "$f"; done || :`,
-    },
-    { name: 'pruneUntrackedFiles', kind: 'list', cmd: `${GIT} ls-files -o --exclude-standard | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && grep -qE '(//|/\\*|<!--)' "$f" && echo "$f"; done || :` },
-    { name: 'untrackedBaseline', kind: 'list', cmd: `${GIT} ls-files -o --exclude-standard` },
-    { name: 'baselineHash', kind: 'hash', cmd: hashCommand() },
-  ]
-}
-
-// ---------- copied command output ----------
-
-// A cheap agent sorting several outputs into several fields once returned an
-// empty pruneFiles its own command had just printed two paths for. So the
-// agent copies one block of output and the script splits it on marker lines.
-const MARKER = '::section::'
-// The harness swaps a Bash result over about 30 KB for a pointer to a file,
-// which the agent then pages through and reassembles by hand; a 90 KB log
-// copied that way came back with 34 commits missing and passed every marker
-// check. So the output is copied in parts that each fit one Bash result, each
-// checked against its cksum. Every part re-runs the same read-only commands in
-// the repository and keeps its own line range: agents asked to relay an opaque
-// temp file refused it as a smuggled signal.
-const CHUNK_BYTES = 20000
-
-function copyBody(sections) {
-  const body = sections.map((sec) => `echo '${MARKER} ${sec.name}'\n${sec.cmd}`).join('\n')
-  return `cd ${shellQuote(ROOT)} && (
-${body}
-echo '${MARKER} end'
-)`
-}
-
-function copyIntro(what) {
-  return `You are a helper of the merge-ready code review loop the user launched on the repository ${ROOT}. The loop's script cannot run commands itself, so it asks you to run one and hand back its output: ${what}. The command only reads git state and files; it changes nothing. The \`${MARKER}\` lines are headers the script splits the output on.`
-}
-
-const COPY_RULE = 'Return its entire output verbatim as `output`: every line, in order, nothing added, removed or reworded. The script checks the copy against a checksum. There is nothing to review in it, so you need not open any file.'
-
-function copyPrompt(sections, what) {
-  const ranges = `awk -v max=${CHUNK_BYTES} '{ l = length($0) + 1; if (n && b + l > max) { print s, NR - 1; n = 0; b = 0 } if (!n) s = NR; n++; b += l } END { if (n) print s, NR }' "$f"`
-  return `${copyIntro(what)} A Bash result over about 30 KB comes back cut, so the command numbers the output's lines into parts of at most ${CHUNK_BYTES} bytes, prints one \`::part::\` line per part (first line, last line, cksum), then the first part itself; other helpers fetch the remaining parts.
-
-Run exactly this shell command via Bash, unmodified, as a single call:
-
-f=$(mktemp) && ${copyBody(sections)} > "$f" && r=$(${ranges}) && echo "$r" | while read -r s e; do echo "::part:: $s $e $(sed -n "$s,\${e}p" "$f" | cksum)"; done && sed -n "$(echo "$r" | head -n 1 | tr ' ' ',')p" "$f"; rm -f "$f"
-
-${COPY_RULE}`
-}
-
-function chunkPrompt(sections, what, chunk, index, count) {
-  return `${copyIntro(what)} A Bash result over about 30 KB comes back cut, so the output is fetched in ${count} parts; this is part ${index}, lines ${chunk.start} to ${chunk.end}, which the \`sed\` at the end keeps.
-
-Run exactly this shell command via Bash, unmodified, as a single call:
-
-${copyBody(sections)} | sed -n '${chunk.start},${chunk.end}p'
-
-${COPY_RULE}`
-}
-
-// The first copy carries one line per part with its line range and cksum,
-// then the first part itself.
-function parseHead(output) {
-  const lines = String(output || '').split('\n').map((l) => l.replace(/\r$/, ''))
-  const chunks = []
-  let i = 0
-  for (; i < lines.length; i++) {
-    const c = /^::part:: (\d+) (\d+) (\d+) (\d+)\s*$/.exec(lines[i])
-    if (c) chunks.push({ start: +c[1], end: +c[2], crc: +c[3], bytes: +c[4] })
-    else if (chunks.length) break
-  }
-  if (!chunks.length || chunks.some((c, k) => c.start !== (k ? chunks[k - 1].end + 1 : 1) || c.end < c.start)) return null
-  const first = verifyChunk(lines.slice(i).join('\n'), chunks[0])
-  return first ? { chunks, first } : null
-}
-
-// A chunk's lines, or null unless they are byte for byte the ones sed printed.
-// A missing trailing blank line is restored, and the copy is tried again
-// without the code fence lines an agent may wrap it in; the check decides
-// which reading is right, since a commit message can hold a fence of its own.
-function verifyChunk(text, chunk) {
-  const lines = String(text || '').split('\n').map((l) => l.replace(/\r$/, ''))
-  const fence = (l) => /^\s*```\S*\s*$/.test(l)
-  const bare = lines.slice(fence(lines[0] || '') ? 1 : 0)
-  while (bare.length && bare[bare.length - 1] === '') bare.pop()
-  if (bare.length && fence(bare[bare.length - 1])) bare.pop()
-  const n = chunk.end - chunk.start + 1
-  for (const candidate of [lines, bare]) {
-    const c = candidate.slice()
-    while (c.length > n && c[c.length - 1] === '') c.pop()
-    while (c.length < n) c.push('')
-    if (c.length !== n) continue
-    const bytes = utf8(c.map((l) => `${l}\n`).join(''))
-    if (bytes.length === chunk.bytes && cksum(bytes) === chunk.crc) return c
-  }
-  return null
-}
-
-// POSIX cksum: CRC-32 with polynomial 0x04C11DB7, MSB first, over the bytes
-// and then the byte count, inverted.
-const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
-  let c = n << 24
-  for (let k = 0; k < 8; k++) c = c & 0x80000000 ? (c << 1) ^ 0x04c11db7 : c << 1
-  return c >>> 0
-})
-
-function cksum(bytes) {
-  let crc = 0
-  const step = (b) => { crc = ((crc << 8) ^ CRC_TABLE[((crc >>> 24) ^ b) & 0xff]) >>> 0 }
-  for (const b of bytes) step(b)
-  for (let n = bytes.length; n > 0; n = Math.floor(n / 256)) step(n & 0xff)
-  return ~crc >>> 0
-}
-
-function utf8(s) {
-  const out = []
-  for (const ch of s) {
-    const c = ch.codePointAt(0)
-    if (c < 0x80) out.push(c)
-    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63))
-    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
-    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
-  }
-  return out
-}
-
-// Returns null when the output is not one complete run of the command: a
-// missing section or end marker, or a hash section without a hash, means lines
-// were lost.
-function parseCopy(lines, sections) {
-  const raw = {}
-  let current = null
-  for (const line of lines) {
-    const marker = new RegExp(`^\\s*${MARKER} (\\w+)\\s*$`).exec(line)
-    if (marker) {
-      current = marker[1]
-      raw[current] = []
-      continue
-    }
-    if (current) raw[current].push(line.replace(/\r$/, ''))
-  }
-  if (!raw.end) return null
-  const value = {}
-  for (const sec of sections) {
-    const lines = raw[sec.name]
-    if (!lines) return null
-    if (sec.kind === 'hash') {
-      const hash = /^\s*([0-9a-f]{64})\b/.exec(lines.find((l) => l.trim()) || '')
-      if (!hash) return null
-      value[sec.name] = hash[1]
-    } else {
-      value[sec.name] = [...new Set(lines.map((l) => l.trim()).filter((l) => l && !l.startsWith('```')))].sort()
-    }
-  }
-  return value
-}
-
-// The first copy runs the command and lays out the parts; the parts past the
-// first are copied in parallel. A copy that fails its check is retried once;
-// the second failure ends the step. A refusal is one agent's judgement of the
-// harness's framing, which its siblings with the same prompt did not share, so
-// it is retried like any other failed copy.
-async function runCopy(sections, what, label, phase, opts) {
-  const head = await copyAttempts(copyPrompt(sections, what), label, phase, opts, parseHead)
-  if (!head.value) return head
-  const { chunks, first } = head.value
-  const rest = await parallel(chunks.slice(1).map((chunk, k) => () =>
-    copyAttempts(chunkPrompt(sections, what, chunk, k + 2, chunks.length), `${label} part ${k + 2}`, phase, opts, (out) => verifyChunk(out, chunk))))
-  const failed = rest.findIndex((r) => !r || !r.value)
-  if (failed >= 0) return { value: null, error: rest[failed] ? rest[failed].error : `the ${label} part ${failed + 2} copy threw` }
-  const value = parseCopy([...first, ...rest.flatMap((r) => r.value)], sections)
-  return value ? { value, error: null } : { value: null, error: `the ${label} output lacks a section marker` }
-}
-
-async function copyAttempts(prompt, label, phase, opts, parse) {
-  const failures = []
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const r = await run(prompt, { label: `${label}.${attempt}`, phase, schema: COPY_SCHEMA, ...opts })
-    const declined = r && r.declined && r.declined.trim()
-    const value = r && !declined ? parse(r.output) : null
-    if (value) return { value, error: null }
-    failures.push(!r ? 'died' : declined ? `declined to run the command (${declined})` : 'returned an output that failed its check')
-  }
-  return { value: null, error: `the ${label} agent ${failures[0] === failures[1] ? `${failures[0]} twice` : `${failures[0]}, then ${failures[1]}`}` }
-}
-
-function shellQuote(s) {
-  return `'${s.replace(/'/g, `'\\''`)}'`
-}
-
-function hashCommand() {
-  if (SCOPE === 'codebase') {
-    return '{ git ls-files -z; git ls-files -o --exclude-standard -z; } | sort -zu | xargs -0 -r sha256sum | sha256sum'
-  }
-  return `{ git diff ${BASE}...HEAD; git diff HEAD; git status --porcelain -z; git ls-files -o --exclude-standard -z | sort -z | xargs -0 -r sha256sum; } | sha256sum`
 }
 
 // ---------- helpers ----------
@@ -492,8 +283,7 @@ function refutedLine(f) {
   const reason = String(f.refuteReason || '')
   const end = reason.search(/[.!?](\s|$)/)
   const first = end >= 0 ? reason.slice(0, end + 1) : reason
-  const { description, refuteReason, ...rest } = f
-  return { ...rest, refuteReason: first.length > 300 ? `${first.slice(0, 300)}…` : first }
+  return { ...f, refuteReason: first.length > 300 ? `${first.slice(0, 300)}…` : first }
 }
 
 // ---------- the loop ----------
@@ -504,7 +294,7 @@ const allUncommittedFixFiles = new Set()
 const allPossiblyDirty = new Set()
 let stopReason = null
 let stopDetail = null
-let excludedKindsTable = null
+const excludedKindsTable = {}
 
 log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_ROUNDS} review round(s), scout and implementers on ${MODEL || 'the session model'}, simplify afterwards`)
 
@@ -549,7 +339,6 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
 
   const entry = {
     round,
-    dimensions: dimensions.map(({ key, title, files }) => ({ key, title, fileCount: files.length })),
     unassignedFiles: missing,
     review,
     error,
@@ -565,12 +354,6 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
 
   for (const f of review.uncommittedFixFiles || []) allUncommittedFixFiles.add(f)
   for (const p of review.possiblyDirty || []) allPossiblyDirty.add(p)
-  const changeKinds = review.changeKinds
-  if (!changeKinds || typeof changeKinds !== 'object' || Object.keys(changeKinds).length === 0) {
-    stopReason = 'review-failed'
-    stopDetail = `round ${round}: the review workflow returned no changeKinds table; the adversarial-review-workflow skill is older than this one`
-    break
-  }
 
   const findings = review.findings || []
   const fixed = findings.filter((f) => f.outcome === 'fixed')
@@ -585,7 +368,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   const finderKeys = new Set(dimensions.map((d) => d.key))
   const productiveFinders = new Set(
     candidates
-      .flatMap((f) => [f.dimension, ...(f.alsoReportedBy || []).map((r) => r.dimension)])
+      .flatMap((f) => [f.dimension, ...(f.alsoReportedBy || [])])
       .filter((k) => finderKeys.has(k)),
   )
   const counts = {
@@ -603,13 +386,13 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   const triage = { candidates: candidates.map((f) => f.id), failed: false, productionIds: [] }
   if (candidates.length) {
     phase('Triage')
-    const t = await run(triagePrompt(round, candidates, findings, changeKinds), { label: `triage @${round}`, phase: 'Triage', schema: triageSchema(changeKinds), ...TRIAGE_OPTS })
+    const t = await run(triagePrompt(round, candidates, findings), { label: `triage @${round}`, phase: 'Triage', schema: TRIAGE_SCHEMA, ...TRIAGE_OPTS })
     if (!t) {
       triage.failed = true
       triage.productionIds = candidates.map((f) => f.id)
       log(`round ${round}: the triage agent died; every medium-or-higher fix is assumed to have changed production behaviour`)
     } else {
-      const isProduction = (v) => v.kinds.some((k) => changeKinds[k] && changeKinds[k].production)
+      const isProduction = (v) => v.kinds.some((k) => CHANGE_KINDS[k] && CHANGE_KINDS[k].production)
       triage.productionIds = t.verdicts
         .filter((v) => candidates.some((f) => f.id === v.id) && isProduction(v))
         .map((v) => v.id)
@@ -618,13 +401,12 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   entry.triage = triage
   // The result lands in the launching session whole, every round of it, so
   // what the report never reads leaves once triage has read the hunks: the
-  // hunks, the kind tables every round repeats, and all of a refuted finding
-  // but its title, skeptic and first sentence.
-  if (!excludedKindsTable && review.excludedKinds) excludedKindsTable = review.excludedKinds
+  // hunks, the fields the loop-wide notes report once for every round, the
+  // exclusion table every round repeats, and all of a refuted finding's reason
+  // but its first sentence.
+  Object.assign(excludedKindsTable, review.excludedKinds)
   entry.review = {
-    ...review,
-    changeKinds: undefined,
-    excludedKinds: undefined,
+    finderFailures: review.finderFailures,
     findings: findings.map(({ hunks, ...f }) => (f.status === 'refuted' ? refutedLine(f) : f)),
   }
 
@@ -666,37 +448,21 @@ if (stopReason !== 'converged') {
   simplify = { ran: false, skipped: `review-loop-${stopReason}`, error: null, result: null }
   log(`simplify skipped: the review loop ended on ${stopReason}`)
 } else {
-  phase('Prepare')
-  const hashCmd = hashCommand()
-  const { value: prep, error: prepError } = await runCopy(prepareSections(), PREPARE_WHAT, 'prepare simplify', 'Prepare', PREPARE_OPTS)
-  if (!prep) {
-    simplify = { ran: false, skipped: 'prepare-failed', error: prepError, result: null }
-    log(`simplify skipped: ${prepError}`)
-  } else if (prep.files.length === 0) {
-    simplify = { ran: false, skipped: 'nothing-to-simplify', error: null, result: null }
-    log('simplify skipped: no source file in scope after the exclusions')
+  phase('Simplify')
+  const simplifyArgs = { scope: SCOPE, root: ROOT, pruneExts: input.pruneExts }
+  if (BASE) simplifyArgs.base = BASE
+  if (CHECK_CMD) simplifyArgs.checkCmd = CHECK_CMD
+  if (input.excludePattern) simplifyArgs.excludePattern = input.excludePattern.trim()
+  if (MODEL) simplifyArgs.applyModel = MODEL
+  const { result, error } = await runChild(input.simplifyScript, simplifyArgs, 'simplify workflow')
+  if (!result) {
+    simplify = { ran: false, skipped: 'simplify-failed', error, result: null }
+    log(`simplify failed: ${error}`)
+  } else if (result.skipped) {
+    simplify = { ran: false, skipped: result.skipped, error: result.error, result: null }
+    log(`simplify skipped: ${result.error || result.skipped}`)
   } else {
-    phase('Simplify')
-    log(`simplify: ${prep.files.length} file(s), ${prep.pruneFiles.length + prep.pruneUntrackedFiles.length} prune candidate(s)`)
-    const simplifyArgs = {
-      scope: SCOPE,
-      root: ROOT,
-      hashCmd,
-      baselineHash: prep.baselineHash,
-      untrackedBaseline: prep.untrackedBaseline,
-      files: prep.files,
-      pruneFiles: prep.pruneFiles,
-      pruneUntrackedFiles: prep.pruneUntrackedFiles,
-      pruneExts: PRUNE_EXTS,
-    }
-    if (BASE) simplifyArgs.base = BASE
-    if (CHECK_CMD) simplifyArgs.checkCmd = CHECK_CMD
-    if (MODEL) simplifyArgs.applyModel = MODEL
-    const { result, error } = await runChild(input.simplifyScript, simplifyArgs, 'simplify workflow')
-    simplify = result
-      ? { ran: true, skipped: null, error: null, result }
-      : { ran: false, skipped: 'simplify-failed', error, result: null }
-    if (!result) log(`simplify failed: ${error}`)
+    simplify = { ran: true, skipped: null, error: null, result }
   }
 }
 

@@ -5,7 +5,7 @@ argument-hint: "<uncommitted|branch|unpushed|codebase> [model]"
 disable-model-invocation: true
 ---
 
-A Workflow reviews the scoped code: one finder per review dimension proposes defects, a dedup check attaches duplicates at intake, two skeptics attack each finding (materiality, then technical truth), a clustering agent groups the confirmed ones by root cause, and one implementer per cluster applies the smallest fix that closes the finding, unless it is an excluded kind, and commits it. You orchestrate from outside: resolve the scope, scout the dimensions, describe the project, launch, report. The phase mechanics, models, efforts, prompts, change kinds and excluded kinds live in [review.mjs](review.mjs) in this skill's folder; running it needs nothing from inside it.
+A Workflow reviews the scoped code: one finder per review dimension proposes defects, a dedup check attaches duplicates at intake, two skeptics attack each finding (materiality, then technical truth), a clustering agent groups the confirmed ones by root cause, and one implementer per cluster applies the smallest fix that closes the finding, unless it is an excluded kind, and commits it. You orchestrate from outside: resolve the scope, scout the dimensions, describe the project, launch, report. The phase mechanics, models, efforts, prompts and excluded kinds live in [review.mjs](review.mjs) in this skill's folder; running it needs nothing from inside it.
 
 ## Steps
 
@@ -45,6 +45,6 @@ A Workflow reviews the scoped code: one finder per review dimension proposes def
 
    Pass `dirtyAtLaunch`, `untracked`, `dimensions` and each `files` as real JSON arrays, not JSON-encoded strings. The script validates the args and throws on a missing one.
 
-   **If the run dies** (a session limit, a killed task), never resume it with `resumeFromRunId`, whatever the harness suggests: the finders and skeptics start their agents in the order earlier ones finish, so the cache misses partway through and the rest re-run live against a tree that already holds the fixes, where the skeptics refute every finding as already fixed. Relaunch from step 1 against the current tree instead, with `authorEnd` set to the commit the dead run started from rather than HEAD, so the fixes it committed read as this review's: the parent (`git rev-parse <sha>^`) of the earliest `commitSha` among its `implement #N` results in its `journal.jsonl`. When it committed nothing, HEAD is still right.
+   **If the run dies** (a session limit, a killed task), never resume it with `resumeFromRunId`, whatever the harness suggests; relaunch it by [RELAUNCH.md](RELAUNCH.md) in this skill's folder.
 
 6. **Report** the result by [REPORT.md](REPORT.md) in this skill's folder.

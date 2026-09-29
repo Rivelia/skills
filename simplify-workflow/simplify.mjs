@@ -2,6 +2,7 @@ export const meta = {
   name: 'simplify-converge',
   description: 'Loop simplification rounds (find, judge, apply) over a scope until fresh finders come up empty, then prune non-useful comments once converged',
   phases: [
+    { title: 'Prepare', detail: 'Sonnet runs the commands listing the scope, the prune candidates and the untracked files, and hashes the tree', model: 'sonnet' },
     { title: 'Find', detail: 'read-only agents propose simplifications per batch', model: 'opus' },
     { title: 'Judge', detail: 'independent gatekeepers strike proposals that are not genuine improvements', model: 'opus' },
     { title: 'Apply', detail: 'implement the approved findings per batch' },
@@ -26,23 +27,12 @@ const FOCUS = {
 
 const input = typeof args === 'string' ? JSON.parse(args) : args
 
-if (!input || !FOCUS[input.scope] || !input.hashCmd || !input.baselineHash || !Array.isArray(input.files) || !Array.isArray(input.untrackedBaseline)) {
-  throw new Error('args must be {scope: "uncommitted"|"branch"|"unpushed"|"codebase", hashCmd: string, baselineHash: string, files: string[], untrackedBaseline: string[], base?: string (required unless scope is "codebase"), model?: string, effort?: string}')
+if (!input || !FOCUS[input.scope]) {
+  throw new Error('args.scope must be one of uncommitted, branch, unpushed, codebase')
 }
-
-// The baseline seeds the same convergence set the round hashes land in, and
-// those are pinned to bare lowercase hex; a raw `sha256sum` line ("<hash>  -")
-// would never match any round hash and fake a tree change on an untouched tree.
-if (!/^[0-9a-f]{64}$/.test(input.baselineHash)) {
-  throw new Error('baselineHash must be the bare 64-character lowercase hex hash, the first field of the hash command output, nothing else')
-}
-
-if (input.files.length === 0) {
-  throw new Error('files must not be empty; nothing is in scope')
-}
-
+if (!input.root) throw new Error('root: absolute project root path is required')
 if (input.scope !== 'codebase' && !input.base) {
-  throw new Error('uncommitted/branch/unpushed scope requires base (a git ref bounding the diff)')
+  throw new Error('uncommitted/branch/unpushed scope requires base (the commit bounding the diff)')
 }
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
@@ -50,22 +40,14 @@ if (input.model && !EFFORTS.includes(input.effort)) {
   throw new Error(`when model is overridden, effort must also be chosen: one of ${EFFORTS.join(', ')}`)
 }
 
-// Pruning always follows convergence, so its inputs are always required. Two
-// empty lists are a legitimate launch: a diff that adds no comment and no
-// untracked source still leaves the comments the simplify phase itself writes
-// to classify. An absent key is a different thing: an orchestrator that
-// computed candidates and failed to pass them would silently narrow the audit
-// to the files the run touched.
-for (const key of ['pruneFiles', 'pruneUntrackedFiles']) {
-  if (input[key] === undefined) throw new Error(`${key}: string[] is required; pass [] for a list with no candidates`)
-  if (!Array.isArray(input[key])) throw new Error(`${key} must be string[]`)
-}
-// Files that appear mid-run are not in either candidate list, so the script
-// needs the orchestrator's own extension filter to judge them by.
+// The prune candidates are the files carrying one of these extensions, and a
+// file that appears mid-run is judged by them too.
 if (!Array.isArray(input.pruneExts) || input.pruneExts.length === 0) {
-  throw new Error('pruneExts: string[] is required, the extensions the candidate lists were filtered on, e.g. [".ts", ".js", ".svelte"]')
+  throw new Error('pruneExts: string[] is required, the comment-carrying source extensions of this repo, e.g. [".ts", ".js", ".svelte"]')
 }
-if (!input.root) throw new Error('root: absolute project root path is required')
+if (input.excludePattern !== undefined && (typeof input.excludePattern !== 'string' || !input.excludePattern.trim() || input.excludePattern.includes("'"))) {
+  throw new Error('excludePattern: a non-empty extended regex with no single quote (it is embedded in single quotes in a shell command) when given; omit it to keep the default')
+}
 
 // Agents start in the session's directory, which is not the root when the run
 // targets a worktree; a prompt without the root sends them to the wrong tree.
@@ -86,6 +68,255 @@ function rootedCmd(cmd) {
 if (input.applyModel !== undefined && (typeof input.applyModel !== 'string' || !input.applyModel.trim())) {
   throw new Error('applyModel: a model name (e.g. opus, sonnet, haiku) when given; omit it to run the appliers on the session model')
 }
+
+// ---------- the launch state, computed here ----------
+
+// The launching session names the scope and the exclusions; the lists and the
+// baseline hash are read here, so a scope of thousands of files never passes
+// through its context.
+
+// Quoted in SKILL.md step 3 of this skill and of merge-ready, so the launching
+// session never opens this script to learn it.
+const DEFAULT_EXCLUDE = '(^|/)(node_modules|vendor|third_party|dist|build|target|generated)/|\\.min\\.|(^|/)(package-lock\\.json|yarn\\.lock|pnpm-lock\\.yaml|Cargo\\.lock|poetry\\.lock|go\\.sum)$|\\.(json|jsonl|csv|tsv|md|mdx|lock|snap|svg|png|jpe?g|gif|ico|webp|pdf|woff2?|ttf|otf|eot|zip|gz|wasm|so|dylib|dll|exe|bin)$'
+const SCOPE = input.scope
+const ROOT = input.root
+const BASE = input.base || null
+const EXCLUDE = input.excludePattern ? input.excludePattern.trim() : DEFAULT_EXCLUDE
+const PRUNE_EXTS = input.pruneExts.map((e) => (e.startsWith('.') ? e : `.${e}`))
+const GIT = 'git -c core.quotePath=false'
+const LIST_TRACKED_CMD = SCOPE === 'codebase' ? `${GIT} ls-files` : `${GIT} diff --name-only ${BASE}`
+const PREPARE_OPTS = { model: 'sonnet', effort: 'low' }
+
+const COPY_SCHEMA = {
+  type: 'object',
+  properties: {
+    output: { type: 'string', description: 'The command\'s output, verbatim.' },
+    declined: { type: 'string', description: 'Only when you did not run the command: why, in one sentence. Leave output empty then.' },
+  },
+  required: ['output'],
+}
+
+function prepareSections() {
+  const extRe = `\\.(${PRUNE_EXTS.map((e) => e.slice(1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`
+  return [
+    { name: 'files', kind: 'list', cmd: `{ ${LIST_TRACKED_CMD}; ${GIT} ls-files -o --exclude-standard; } | sort -u | grep -vE '${EXCLUDE}' | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done || :` },
+    {
+      name: 'pruneFiles',
+      kind: 'list',
+      cmd: SCOPE === 'codebase'
+        ? `${GIT} ls-files | sort -u | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && grep -qE '(//|/\\*|<!--)' "$f" && echo "$f"; done || :`
+        : `${GIT} diff --name-only ${BASE} | sort -u | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && ${GIT} diff ${BASE} -- "$f" | grep -qE '^\\+.*(//|/\\*|<!--)' && echo "$f"; done || :`,
+    },
+    { name: 'pruneUntrackedFiles', kind: 'list', cmd: `${GIT} ls-files -o --exclude-standard | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && grep -qE '(//|/\\*|<!--)' "$f" && echo "$f"; done || :` },
+    { name: 'untrackedBaseline', kind: 'list', cmd: `${GIT} ls-files -o --exclude-standard` },
+    { name: 'baselineHash', kind: 'hash', cmd: hashCommand() },
+  ]
+}
+
+// ---------- copied command output ----------
+
+// A cheap agent sorting several outputs into several fields once returned an
+// empty pruneFiles its own command had just printed two paths for. So the
+// agent copies one block of output and the script splits it on marker lines.
+const MARKER = '::section::'
+// The harness swaps a Bash result over about 30 KB for a pointer to a file,
+// which the agent then pages through and reassembles by hand; a 90 KB log
+// copied that way came back with 34 commits missing and passed every marker
+// check. So the output is copied in parts that each fit one Bash result, each
+// checked against its cksum. Every part re-runs the same read-only commands in
+// the repository and keeps its own line range: agents asked to relay an opaque
+// temp file refused it as a smuggled signal.
+const CHUNK_BYTES = 20000
+
+function copyBody(sections) {
+  const body = sections.map((sec) => `echo '${MARKER} ${sec.name}'\n${sec.cmd}`).join('\n')
+  return `cd ${shellQuote(ROOT)} && (
+${body}
+echo '${MARKER} end'
+)`
+}
+
+function copyIntro(what) {
+  return `You are a helper of the simplify workflow the user launched on the repository ${ROOT}. The workflow's script cannot run commands itself, so it asks you to run one and hand back its output: ${what}. The command only reads git state and files; it changes nothing. The \`${MARKER}\` lines are headers the script splits the output on.`
+}
+
+const COPY_RULE = 'Return its entire output verbatim as `output`: every line, in order, nothing added, removed or reworded. The script checks the copy against a checksum. There is nothing to review in it, so you need not open any file.'
+
+function copyPrompt(sections, what) {
+  const ranges = `awk -v max=${CHUNK_BYTES} '{ l = length($0) + 1; if (n && b + l > max) { print s, NR - 1; n = 0; b = 0 } if (!n) s = NR; n++; b += l } END { if (n) print s, NR }' "$f"`
+  return `${copyIntro(what)} A Bash result over about 30 KB comes back cut, so the command numbers the output's lines into parts of at most ${CHUNK_BYTES} bytes, prints one \`::part::\` line per part (first line, last line, cksum), then the first part itself; other helpers fetch the remaining parts.
+
+Run exactly this shell command via Bash, unmodified, as a single call:
+
+f=$(mktemp) && ${copyBody(sections)} > "$f" && r=$(${ranges}) && echo "$r" | while read -r s e; do echo "::part:: $s $e $(sed -n "$s,\${e}p" "$f" | cksum)"; done && sed -n "$(echo "$r" | head -n 1 | tr ' ' ',')p" "$f"; rm -f "$f"
+
+${COPY_RULE}`
+}
+
+function chunkPrompt(sections, what, chunk, index, count) {
+  return `${copyIntro(what)} A Bash result over about 30 KB comes back cut, so the output is fetched in ${count} parts; this is part ${index}, lines ${chunk.start} to ${chunk.end}, which the \`sed\` at the end keeps.
+
+Run exactly this shell command via Bash, unmodified, as a single call:
+
+${copyBody(sections)} | sed -n '${chunk.start},${chunk.end}p'
+
+${COPY_RULE}`
+}
+
+// The first copy carries one line per part with its line range and cksum,
+// then the first part itself.
+function parseHead(output) {
+  const lines = String(output || '').split('\n').map((l) => l.replace(/\r$/, ''))
+  const chunks = []
+  let i = 0
+  for (; i < lines.length; i++) {
+    const c = /^::part:: (\d+) (\d+) (\d+) (\d+)\s*$/.exec(lines[i])
+    if (c) chunks.push({ start: +c[1], end: +c[2], crc: +c[3], bytes: +c[4] })
+    else if (chunks.length) break
+  }
+  if (!chunks.length || chunks.some((c, k) => c.start !== (k ? chunks[k - 1].end + 1 : 1) || c.end < c.start)) return null
+  const first = verifyChunk(lines.slice(i).join('\n'), chunks[0])
+  return first ? { chunks, first } : null
+}
+
+// A chunk's lines, or null unless they are byte for byte the ones sed printed.
+// A missing trailing blank line is restored, and the copy is tried again
+// without the code fence lines an agent may wrap it in; the check decides
+// which reading is right, since a commit message can hold a fence of its own.
+function verifyChunk(text, chunk) {
+  const lines = String(text || '').split('\n').map((l) => l.replace(/\r$/, ''))
+  const fence = (l) => /^\s*```\S*\s*$/.test(l)
+  const bare = lines.slice(fence(lines[0] || '') ? 1 : 0)
+  while (bare.length && bare[bare.length - 1] === '') bare.pop()
+  if (bare.length && fence(bare[bare.length - 1])) bare.pop()
+  const n = chunk.end - chunk.start + 1
+  for (const candidate of [lines, bare]) {
+    const c = candidate.slice()
+    while (c.length > n && c[c.length - 1] === '') c.pop()
+    while (c.length < n) c.push('')
+    if (c.length !== n) continue
+    const bytes = utf8(c.map((l) => `${l}\n`).join(''))
+    if (bytes.length === chunk.bytes && cksum(bytes) === chunk.crc) return c
+  }
+  return null
+}
+
+// POSIX cksum: CRC-32 with polynomial 0x04C11DB7, MSB first, over the bytes
+// and then the byte count, inverted.
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n << 24
+  for (let k = 0; k < 8; k++) c = c & 0x80000000 ? (c << 1) ^ 0x04c11db7 : c << 1
+  return c >>> 0
+})
+
+function cksum(bytes) {
+  let crc = 0
+  const step = (b) => { crc = ((crc << 8) ^ CRC_TABLE[((crc >>> 24) ^ b) & 0xff]) >>> 0 }
+  for (const b of bytes) step(b)
+  for (let n = bytes.length; n > 0; n = Math.floor(n / 256)) step(n & 0xff)
+  return ~crc >>> 0
+}
+
+function utf8(s) {
+  const out = []
+  for (const ch of s) {
+    const c = ch.codePointAt(0)
+    if (c < 0x80) out.push(c)
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63))
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+  }
+  return out
+}
+
+// Returns null when the output is not one complete run of the command: a
+// missing section or end marker, or a hash section without a hash, means lines
+// were lost.
+function parseCopy(lines, sections) {
+  const raw = {}
+  let current = null
+  for (const line of lines) {
+    const marker = new RegExp(`^\\s*${MARKER} (\\w+)\\s*$`).exec(line)
+    if (marker) {
+      current = marker[1]
+      raw[current] = []
+      continue
+    }
+    if (current) raw[current].push(line.replace(/\r$/, ''))
+  }
+  if (!raw.end) return null
+  const value = {}
+  for (const sec of sections) {
+    const lines = raw[sec.name]
+    if (!lines) return null
+    if (sec.kind === 'hash') {
+      const hash = /^\s*([0-9a-f]{64})\b/.exec(lines.find((l) => l.trim()) || '')
+      if (!hash) return null
+      value[sec.name] = hash[1]
+    } else {
+      value[sec.name] = [...new Set(lines.map((l) => l.trim()).filter((l) => l && !l.startsWith('```')))].sort()
+    }
+  }
+  return value
+}
+
+// The first copy runs the command and lays out the parts; the parts past the
+// first are copied in parallel. A copy that fails its check is retried once;
+// the second failure ends the step. A refusal is one agent's judgement of the
+// harness's framing, which its siblings with the same prompt did not share, so
+// it is retried like any other failed copy.
+async function runCopy(sections, what, label, phase, opts) {
+  const head = await copyAttempts(copyPrompt(sections, what), label, phase, opts, parseHead)
+  if (!head.value) return head
+  const { chunks, first } = head.value
+  const rest = await parallel(chunks.slice(1).map((chunk, k) => () =>
+    copyAttempts(chunkPrompt(sections, what, chunk, k + 2, chunks.length), `${label} part ${k + 2}`, phase, opts, (out) => verifyChunk(out, chunk))))
+  const failed = rest.findIndex((r) => !r || !r.value)
+  if (failed >= 0) return { value: null, error: rest[failed] ? rest[failed].error : `the ${label} part ${failed + 2} copy threw` }
+  const value = parseCopy([...first, ...rest.flatMap((r) => r.value)], sections)
+  return value ? { value, error: null } : { value: null, error: `the ${label} output lacks a section marker` }
+}
+
+async function copyAttempts(prompt, label, phase, opts, parse) {
+  const failures = []
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const r = await run(prompt, { label: `${label}.${attempt}`, phase, schema: COPY_SCHEMA, ...opts })
+    const declined = r && r.declined && r.declined.trim()
+    const value = r && !declined ? parse(r.output) : null
+    if (value) return { value, error: null }
+    failures.push(!r ? 'died' : declined ? `declined to run the command (${declined})` : 'returned an output that failed its check')
+  }
+  return { value: null, error: `the ${label} agent ${failures[0] === failures[1] ? `${failures[0]} twice` : `${failures[0]}, then ${failures[1]}`}` }
+}
+
+function hashCommand() {
+  if (SCOPE === 'codebase') {
+    return '{ git ls-files -z; git ls-files -o --exclude-standard -z; } | sort -zu | xargs -0 -r sha256sum | sha256sum'
+  }
+  return `{ git diff ${BASE}...HEAD; git diff HEAD; git status --porcelain -z; git ls-files -o --exclude-standard -z | sort -z | xargs -0 -r sha256sum; } | sha256sum`
+}
+
+// agent() resolves to null for a skipped or dead agent and throws once a
+// user-set token budget is exhausted; both end the step the same way.
+async function run(prompt, opts) {
+  try {
+    return await agent(prompt, opts)
+  } catch {
+    return null
+  }
+}
+
+phase('Prepare')
+const { value: prep, error: prepError } = await runCopy(prepareSections(), 'the file lists and tree hash the simplify pass starts from', 'prepare', 'Prepare', PREPARE_OPTS)
+if (!prep) {
+  log(`simplify skipped: ${prepError}`)
+  return { skipped: 'prepare-failed', error: prepError }
+}
+if (prep.files.length === 0) {
+  log('simplify skipped: no source file in scope after the exclusions')
+  return { skipped: 'nothing-to-simplify', error: null }
+}
+const HASH_CMD = hashCommand()
 
 const BATCH_SIZE = 15
 const MAX_ROUNDS = 100
@@ -337,7 +568,7 @@ Return every path it prints, verbatim, as \`untracked\`, relative to the project
     log('discovery agent died; undeclared new files, if any, will not be pruned or verified')
     return []
   }
-  const before = new Set([...input.untrackedBaseline, ...known])
+  const before = new Set([...prep.untrackedBaseline, ...known])
   return result.untracked.filter(f => !before.has(f))
 }
 
@@ -364,7 +595,7 @@ Report whether it passed. For every failure it reports (type error, test failure
 
 const allChanges = []
 const allRejected = []
-const globalSeen = new Set([input.baselineHash])
+const globalSeen = new Set([prep.baselineHash])
 let iterations = 0
 let sweeps = 0
 let stopReason = 'converged'
@@ -373,7 +604,7 @@ let outstandingFailures = []
 // whose hash agent died needs its own record of it: discovery and the fix-up
 // are gated on the tree having moved, and must still run when the hash is gone.
 let treeEdited = false
-let lastTreeHash = input.baselineHash
+let lastTreeHash = prep.baselineHash
 const filesCreatedDuringRun = []
 // The prune phase and the fix-up both have to reach files an applier edited
 // without living to report them, and an applier's approved targets are the only
@@ -481,7 +712,7 @@ function topDir(path) {
 
 const batches = []
 const byDir = new Map()
-for (const path of input.files) {
+for (const path of prep.files) {
   const dir = topDir(path)
   if (!byDir.has(dir)) byDir.set(dir, [])
   byDir.get(dir).push(path)
@@ -492,14 +723,14 @@ for (const [dir, files] of byDir) {
     batches.push({ name, group: dir, files: files.slice(i, i + BATCH_SIZE), active: true, visits: 0 })
   }
 }
-log(`${input.files.length} files across ${batches.length} batches (scope: ${input.scope})`)
+log(`${prep.files.length} files across ${batches.length} batches (scope: ${input.scope})`)
 // The workflow harness caps a run at 1000 agents in total; each batch-round
 // costs up to three agents (find, judge, apply).
 if (batches.length > 80) {
   log(`warning: ${batches.length} batches; the 1000-agent lifetime cap may end this run before convergence`)
 }
 
-const known = new Set(input.files)
+const known = new Set(prep.files)
 
 // A batch nobody could ever analyse is dropped rather than retried forever, so
 // its files leave no trace anywhere else in the result: this is the only record
@@ -522,7 +753,7 @@ const scopeNote =
 
 // A file that did not exist at the base has an empty diff against it, so the
 // diff-bounded note on its own tells the finder that nothing in it is in scope.
-const wholeFile = new Set(input.untrackedBaseline)
+const wholeFile = new Set(prep.untrackedBaseline)
 
 function batchScopeNote(files) {
   if (input.scope === 'codebase') return ''
@@ -775,7 +1006,7 @@ while (true) {
   for (const f of newFiles) assignNewFile(f)
   filesCreatedDuringRun.push(...newFiles)
 
-  const treeHash = await runHash(input.hashCmd, `hash:tree@${iterations}`)
+  const treeHash = await runHash(HASH_CMD, `hash:tree@${iterations}`)
   if (!treeHash) {
     stopReason = 'hash-unavailable'
     log(`round ${iterations}: hash agent could not return a hash, so convergence cannot be confirmed; stopping and reporting the work done so far`)
@@ -843,7 +1074,7 @@ if (input.checkCmd && !checkDisabled && treeMoved) {
   // unseeded set would let the first pass look settled.
   const fixLeftTreeIntact = fix && fix.passed && !fix.fixed.length && !fix.remaining.length
   if (stopReason === 'converged' && !fixLeftTreeIntact) {
-    const postFixHash = await runHash(input.hashCmd, 'hash:tree@postfix')
+    const postFixHash = await runHash(HASH_CMD, 'hash:tree@postfix')
     if (postFixHash) {
       lastTreeHash = postFixHash
     } else {
@@ -863,10 +1094,10 @@ if (stopReason === 'converged') {
     const i = base.lastIndexOf('.')
     return i > 0 ? base.slice(i) : ''
   }
-  const trackedPruneFiles = input.pruneFiles
-  const untrackedPruneFiles = input.pruneUntrackedFiles
+  const trackedPruneFiles = prep.pruneFiles
+  const untrackedPruneFiles = prep.pruneUntrackedFiles
   const alreadyListed = new Set([...trackedPruneFiles, ...untrackedPruneFiles])
-  const pruneExts = new Set(input.pruneExts.map(e => (e.startsWith('.') ? e : `.${e}`)))
+  const pruneExts = new Set(PRUNE_EXTS)
   const createdPruneFiles = filesCreatedDuringRun.filter(f => pruneExts.has(extOf(f)) && !alreadyListed.has(f))
   // The tracked candidate list was frozen before launch from the pre-run diff, so
   // a file that carried no comment then is absent from it even after an applier
@@ -993,7 +1224,7 @@ Remove every removal candidate with Read + Edit: remove only the comment (and it
     activeBatches = activeBatches.filter((b) => !cleanIds.has(b.id) && !abandonedIds.has(b.id))
     batchesDone += cleanIds.size
 
-    const hash = await runHash(input.hashCmd, `hash:prune@${pruneIterations}`)
+    const hash = await runHash(HASH_CMD, `hash:prune@${pruneIterations}`)
     if (!hash) {
       pruneStop = 'hash-unavailable'
       // The removals of the pass that ends the loop are real, and counting them

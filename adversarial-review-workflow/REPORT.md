@@ -1,6 +1,6 @@
 # Reporting a review.mjs result
 
-Each finding carries `status` (`confirmed`, `refuted`, `agent_failed`) and, once an implementer reached it, `outcome` (`fixed`, `covered`, `not_fixed`, `reverted`, `agent_failed`), plus only the fields named below for its category. `excludedKinds` maps each exclusion key to its description.
+Each finding carries `status` (`confirmed`, `refuted`, `agent_failed`) and, once an implementer reached it, `outcome` (`fixed`, `covered`, `not_fixed`, `reverted`, `agent_failed`), plus only the fields named below for its category. `excludedKinds` maps each exclusion key a finding was refused under to its description.
 
 Report every finding in six categories, ordered by severity within each:
 - fixed: committed as `commitSha`, or left uncommitted in the working tree when it is null, naming the `files`, plus the implementer's `notes` on what a fuller fix would need;
@@ -10,7 +10,7 @@ Report every finding in six categories, ordered by severity within each:
 - never attempted because an agent failed, naming the agent (`failedAt`);
 - refuted, with the skeptic (`refutedBy`) and its `refuteReason`.
 
-Number the findings continuously across the whole report so each can be quoted by its number. Say when a finding carries `corrected`: the technical skeptic rewrote its description. When `implementerModel` is not null, say which model applied the fixes. A duplicate the dedup attached at intake appears in its primary's `alsoReportedBy`, present only when non-empty; report it under its primary as "also reported by" with the finder that reported it, without a number of its own. Then:
+Number the findings continuously across the whole report so each can be quoted by its number. Say when a finding carries `corrected`: the technical skeptic rewrote its description. When `implementerModel` is not null, say which model applied the fixes. `alsoReportedBy`, present only when non-empty, lists the finders whose duplicate the dedup attached at intake; report them under the primary as "also reported by", without a number of their own. Then:
 - `finderFailures` non-empty: state prominently that those dimensions were never reviewed, naming them, and make no claim that the scope was covered.
 - `checksConfigured` false: state that no check command was found, so every fix was verified only by reading, and the user should run the project's checks before relying on the tree.
 - `uncommittedFixFiles` non-empty: list them and say those fixes sit in the working tree next to the user's uncommitted work.

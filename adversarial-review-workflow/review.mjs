@@ -3,7 +3,7 @@ export const meta = {
   description: 'Adversarial code review over a scope: finders per dimension, dedup at intake, two skeptics per finding, root-cause clustering, implementers that commit their own fix',
   phases: [
     { title: 'Find', detail: 'one Opus finder per dimension', model: 'opus' },
-    { title: 'Dedup', detail: 'Sonnet intake check against the registered findings', model: 'sonnet' },
+    { title: 'Dedup', detail: 'Sonnet intake check against the registered findings in the same file', model: 'sonnet' },
     { title: 'Verify', detail: 'materiality skeptic, then technical skeptic', model: 'opus' },
     { title: 'Cluster', detail: 'group confirmed findings by root cause', model: 'opus' },
     { title: 'Implement', detail: 'one implementer per cluster (the session model unless args.implementerModel overrides), strictly sequential, commits its own fix' },
@@ -141,25 +141,6 @@ const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit
 // nothing to knowing which angle is whose.
 const DIMENSION_LIST = DIMENSIONS.map((d) => `- ${d.key}: ${d.title}`).join('\n')
 
-// One vocabulary for what a fix is made of, which the merge-ready triage judges
-// each fix's hunks in, reading the table from this script's result.
-// `production` marks the kinds that change what shipped code does at runtime.
-const CHANGE_KINDS = {
-  logic: { production: true, text: 'a change to what shipped code does: application logic, data handling, queries, API handlers, UI behaviour; a helper local to the file it fixes is part of it' },
-  config: { production: true, text: 'configuration the running product reads' },
-  robustness: { production: true, text: 'a small guard or fallback with no user-visible effect today' },
-  rename: { production: false, text: 'a symbol renamed with every consumer updated and nothing else changed' },
-  'dead-code': { production: false, text: 'unreachable or unused code removed' },
-  types: { production: false, text: 'type annotations with no runtime effect' },
-  format: { production: false, text: 'formatting only' },
-  comment: { production: false, text: 'comments and docstrings' },
-  docs: { production: false, text: 'docs, agent docs, tool and prompt descriptions' },
-  copy: { production: false, text: 'user-facing copy, error message text and translations' },
-  'log-text': { production: false, text: 'log message text' },
-  test: { production: false, text: 'tests, fixtures and test helpers, added or updated' },
-  'ci-build': { production: false, text: 'existing CI or build configuration' },
-}
-
 // The kinds of fix never auto-applied, each with the key the implementer
 // reports when it refuses one. These are the only grounds for refusing a fix.
 const EXCLUSIONS = {
@@ -263,12 +244,11 @@ const IMPL_SCHEMA = {
     excludedKind: { type: ['string', 'null'], enum: [...EXCLUSION_KEYS, null], description: 'For not_applied: the key of the excluded kind that applies; null for every other outcome.' },
     files: { type: 'array', items: { type: 'string' }, description: 'Repo-relative paths you changed or created (empty unless outcome is applied).' },
     hunks: { type: 'string', description: 'The `git diff` of your change when you left it uncommitted; empty when you committed it (the commit carries it) and unless outcome is applied.' },
-    checks: { type: 'array', items: { type: 'object', properties: { command: { type: 'string' }, result: { type: 'string' } }, required: ['command', 'result'] } },
     committed: { type: 'boolean' },
     commitSha: { type: ['string', 'null'] },
     notes: { type: 'string', description: 'Anything beyond the finding that a more complete fix would need.' },
   },
-  required: ['outcome', 'plan', 'reason', 'excludedKind', 'files', 'hunks', 'checks', 'committed', 'commitSha', 'notes'],
+  required: ['outcome', 'plan', 'reason', 'excludedKind', 'files', 'hunks', 'committed', 'commitSha', 'notes'],
 }
 
 const SIBLING_SCHEMA = {
@@ -323,13 +303,12 @@ Rules:
 - Give the exact file and line in the current working tree. An empty findings list is a valid answer.`
 }
 
-// Every registered finding is listed on every intake, so only the ones in the
-// new finding's file carry their description: the list grows with the square
-// of the finding count, and a duplicate elsewhere shows in its title and
-// location.
+// Findings are reported at their root location, the line whose change fixes
+// them, so a duplicate shares the new finding's file; only those are compared,
+// and a finding with none gets no dedup agent at all.
 function dedupPrompt(f, dim, candidates) {
-  const list = candidates.map((c) => `- id ${c.id}: "${c.title}" at ${c.file}:${c.line}${c.file === f.file ? `\n  ${c.description}` : ''}`).join('\n')
-  return `You are the DEDUP check of a code review. A new finding just arrived from finder "${dim}". Compare it with every registered finding below and say whether it is the same defect as one of them.
+  const list = candidates.map((c) => `- id ${c.id}: "${c.title}" at ${c.file}:${c.line}\n  ${c.description}`).join('\n')
+  return `You are the DEDUP check of a code review. A new finding just arrived from finder "${dim}". Compare it with every registered finding in the same file below and say whether it is the same defect as one of them.
 Definition: two findings are the same defect when one change at one location fixes both. Findings that are merely related, in the same file, or share a theme are not the same defect. When in doubt, answer null (not a duplicate).
 
 New finding:
@@ -338,7 +317,7 @@ Location: ${f.file}:${f.line}
 Description: ${f.description}
 Suggested fix: ${f.suggestedFix}
 
-Registered findings (descriptions shown for the ones in the same file; read the code at a location when a title alone leaves it open):
+Registered findings in ${f.file} (read the code at a location when a description alone leaves it open):
 ${list}
 
 Answer with the id of the registered finding it duplicates, or null.`
@@ -434,7 +413,7 @@ function checksText() {
   if (CHECKS) {
     return `Then run the project checks relevant to what you touched:\n${CHECKS}\nFix what they flag without going beyond the finding. A check you cannot make pass that way means you undo your own hunks (\`git checkout -- <file>\` for a file that is not protected, editing back by hand for a protected one, deleting files you created) and return outcome=reverted with the plan and the reason.`
   }
-  return 'No check command is known for this project. Verify your change by reading it against its callers and by running the existing tests that cover the files you touched, if any; report what you ran in checks.'
+  return 'No check command is known for this project. Verify your change by reading it against its callers and by running the existing tests that cover the files you touched, if any.'
 }
 
 function implementerPrompt(e, siblings) {
@@ -461,7 +440,7 @@ Otherwise: make the change. ${checksText()}
 
 Commit rule: when none of the files you changed or created is protected, commit the fix yourself: \`git add <exactly your files>\`, then \`git commit\` with a message in the project's commit convention (from the context above; default \`type(scope): subject\`), with no attribution lines or trailers; report committed=true and the sha. When any file you changed is protected, leave the whole fix uncommitted and report committed=false: never commit a whole file to get around the overlap.
 
-Report outcome=applied with exactly the files you changed, your own hunks pasted only when the fix stays uncommitted (a protected file's diff also holds the user's work), every check command with its result, and the commit state. Finish with \`git status --porcelain\` and make sure your report matches it: nothing of yours may remain in the tree after not_applied, covered or reverted.`
+Report outcome=applied with exactly the files you changed, your own hunks pasted only when the fix stays uncommitted (a protected file's diff also holds the user's work), and the commit state. Finish with \`git status --porcelain\` and make sure your report matches it: nothing of yours may remain in the tree after not_applied, covered or reverted.`
 }
 
 function siblingPrompt(s, lead, fix) {
@@ -566,12 +545,13 @@ async function verify(e) {
 function registerAndVerify(f, dim) {
   const p = dedupChain.then(async () => {
     let dupOf = null
-    if (registry.length > 0) {
-      const d = await run(dedupPrompt(f, dim, registry), { label: `dedup: ${f.title.slice(0, 50)}`, phase: 'Dedup', schema: DEDUP_SCHEMA, ...DEDUP_OPTS })
-      if (d && d.duplicateOf !== null && registry.some((c) => c.id === d.duplicateOf)) dupOf = d.duplicateOf
+    const sameFile = registry.filter((c) => c.file === f.file)
+    if (sameFile.length > 0) {
+      const d = await run(dedupPrompt(f, dim, sameFile), { label: `dedup: ${f.title.slice(0, 50)}`, phase: 'Dedup', schema: DEDUP_SCHEMA, ...DEDUP_OPTS })
+      if (d && d.duplicateOf !== null && sameFile.some((c) => c.id === d.duplicateOf)) dupOf = d.duplicateOf
     }
     if (dupOf !== null) {
-      byId(dupOf).alsoReportedBy.push({ dimension: dim, title: f.title, file: f.file, line: f.line })
+      byId(dupOf).alsoReportedBy.push(dim)
       log(`dedup: "${f.title}" (${dim}) attached to #${dupOf}`)
       return
     }
@@ -734,9 +714,10 @@ function reported(e) {
     file: e.file,
     line: e.line,
     severity: e.finalSeverity ?? e.severity,
-    description: e.finalDescription ?? e.description,
     status: e.status,
   }
+  // A refuted finding is reported by its title and the skeptic's reason alone.
+  if (e.status !== 'refuted') f.description = e.finalDescription ?? e.description
   if (e.corrected) f.corrected = true
   if (e.alsoReportedBy.length) f.alsoReportedBy = e.alsoReportedBy
   if (e.status === 'refuted') Object.assign(f, { refutedBy: e.refutedBy, refuteReason: e.refuteReason })
@@ -763,8 +744,8 @@ return {
   implementerModel: IMPLEMENTER_MODEL,
   base: BASE,
   checksConfigured: CHECKS !== null,
-  changeKinds: CHANGE_KINDS,
-  excludedKinds: EXCLUSIONS,
+  // Only the exclusions a finding was refused under: the report quotes no other.
+  excludedKinds: Object.fromEntries(EXCLUSION_KEYS.filter((k) => registry.some((e) => e.outcome === 'not_fixed' && e.implementation.excludedKind === k)).map((k) => [k, EXCLUSIONS[k]])),
   finderFailures,
   uncommittedFixFiles: [...uncommittedFixFiles],
   possiblyDirty: [...possiblyDirty],

@@ -1,0 +1,3 @@
+# Relaunching a dead review.mjs run
+
+Never resume it with `resumeFromRunId`, whatever the harness suggests. The finders and skeptics start their agents in the order earlier ones finish, so the cache misses partway through and the rest re-run live against a tree that already holds the fixes, where the skeptics refute every finding as already fixed. Relaunch from step 1 against the current tree instead, with `authorEnd` set to the commit the dead run started from rather than HEAD, so the fixes it committed read as this review's: the parent (`git rev-parse <sha>^`) of the earliest `commitSha` among its `implement #N` results in its `journal.jsonl`. When it committed nothing, HEAD is still right.
