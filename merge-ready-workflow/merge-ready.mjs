@@ -2,7 +2,7 @@ export const meta = {
   name: 'merge-ready',
   description: 'Repeat the adversarial code review over a scope, re-scouting the finders each round, until a round fixes nothing medium or higher that changes production behaviour and fewer than half its finders reported a medium-or-higher fix; then simplify the same scope',
   phases: [
-    { title: 'Scout', detail: 'Sonnet records the tree state and, in round 1, the author\'s commit log, then the session model (or args.model) at medium effort designs the finder dimensions afresh for the round' },
+    { title: 'Scout', detail: 'the session model (or args.model) at medium effort designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
     { title: 'Triage', detail: 'Opus classifies each fixed medium-or-higher finding by the kinds of change in its hunks; a production kind means another round', model: 'opus' },
     { title: 'Prepare', detail: 'Sonnet computes the simplify inputs: file list, prune candidates, untracked baseline, tree hash', model: 'sonnet' },
@@ -49,8 +49,13 @@ for (const key of ['checks', 'checkCmd', 'excludePattern', 'model', 'intent']) {
     throw new Error(`args.${key}: a non-empty string when given; omit it otherwise`)
   }
 }
-if (input.loopStart !== undefined && (typeof input.loopStart !== 'string' || !/^[0-9a-f]{7,40}$/.test(input.loopStart) || input.scope === 'codebase')) {
-  throw new Error('args.loopStart: the hex commit a dead earlier run of this loop started from, only for a scope with a base; omit it otherwise')
+for (const key of ['files', 'dirtyAtLaunch', 'untracked']) {
+  if (!Array.isArray(input[key])) throw new Error(`args.${key}: string[] is required; pass [] when there is none`)
+}
+if (input.scope === 'codebase'
+  ? input.loopStart !== undefined
+  : typeof input.loopStart !== 'string' || !/^[0-9a-f]{7,40}$/.test(input.loopStart)) {
+  throw new Error('args.loopStart: the hex commit the loop starts from (HEAD at launch, or the start of a dead earlier run) is required for a scope with a base; omit it for codebase')
 }
 if (input.excludePattern && input.excludePattern.includes("'")) {
   throw new Error('args.excludePattern: the pattern is embedded in single quotes in a shell command and may not contain one')
@@ -63,14 +68,13 @@ const CHECKS = input.checks ? input.checks.trim() : null
 const CHECK_CMD = input.checkCmd ? input.checkCmd.trim() : null
 const EXCLUDE = input.excludePattern ? input.excludePattern.trim() : DEFAULT_EXCLUDE
 // The author's note on what the diff deliberately does, when the user gave one;
-// the branch's commit messages are collected by the first round's state agent.
+// the agents read the author's commit messages themselves, up to loopStart.
 const INTENT_NOTE = input.intent ? input.intent.trim() : null
 // The model argument replaces the session model wherever that is the default: the scout
 // here, the review implementers, the simplify appliers. Every other agent keeps its model.
 const MODEL = input.model ? input.model.trim() : undefined
 const PRUNE_EXTS = input.pruneExts.map((e) => (e.startsWith('.') ? e : `.${e}`))
 
-const STATE_OPTS = { model: 'sonnet', effort: 'low' }
 const SCOUT_OPTS = { ...(MODEL ? { model: MODEL } : {}), effort: 'medium' }
 const TRIAGE_OPTS = { model: 'opus', effort: 'medium' }
 const PREPARE_OPTS = { model: 'sonnet', effort: 'low' }
@@ -95,8 +99,8 @@ const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit
 
 const GIT = 'git -c core.quotePath=false'
 const LIST_TRACKED_CMD = SCOPE === 'codebase' ? `${GIT} ls-files` : `${GIT} diff --name-only ${BASE}`
-// A relaunch after a dead run passes the commit that run started from, so the
-// fixes it committed are set apart from the author's commits like this run's own.
+// Where the author's commits end and the loop's begin: HEAD at launch, or the
+// commit a dead earlier run started from, so its fixes read as the loop's too.
 const LOOP_START = input.loopStart || null
 
 // ---------- schemas ----------
@@ -156,82 +160,37 @@ function triageSchema(changeKinds) {
 
 // ---------- prompts ----------
 
-// The status is read NUL-separated because the plain porcelain format quotes
-// any path with a space whatever core.quotePath says. The status columns are
-// stripped in the shell, and a rename or copy entry is followed by its source
-// path, so the section is a plain path list like the others.
-const STATUS_PATHS_CMD = `${GIT} status --porcelain -z | while IFS= read -r -d '' e; do echo "\${e:3}"; case "\${e:0:2}" in *R*|*C*) IFS= read -r -d '' e; echo "$e";; esac; done`
-
-// The author's commits end where the loop's begin: at loopStart on a relaunch,
-// else at HEAD when round 1 reads the state. Round 1 copies their messages
-// once, since no round changes them; every later round lists only the shas of
-// the commits the loop added since, whose messages the intent never quotes.
-const STATE_WHAT = BASE
-  ? `the files dirty, untracked and changed against ${BASE.slice(0, 9)}, and the branch's commits, which the review round reads`
-  : 'the files dirty, untracked and tracked, which the review round reads'
 const PREPARE_WHAT = 'the file lists and tree hash the simplify pass starts from'
 
-function stateSections(round, authorEnd) {
-  const sections = [
-    { name: 'dirtyAtLaunch', kind: 'list', cmd: STATUS_PATHS_CMD },
-    { name: 'untracked', kind: 'list', cmd: `${GIT} ls-files -o --exclude-standard` },
-    { name: 'tracked', kind: 'list', cmd: LIST_TRACKED_CMD },
-  ]
-  if (!BASE) return sections
-  if (round === 1) {
-    if (!authorEnd) sections.push({ name: 'head', kind: 'commit', cmd: `${GIT} rev-parse HEAD` })
-    sections.push({ name: 'log', kind: 'text', cmd: `${GIT} log --format='--- %H%n%B' ${BASE}..${authorEnd || 'HEAD'}` })
-  }
-  if (authorEnd) sections.push({ name: 'loopCommits', kind: 'list', cmd: `${GIT} rev-list ${authorEnd}..HEAD` })
-  return sections
-}
-
-// The state's log is a sequence of "--- <sha>" markers, each followed by
-// that commit's message.
-function parseLog(log) {
-  const commits = []
-  let current = null
-  for (const line of String(log || '').split('\n')) {
-    const m = /^--- ([0-9a-f]{40})\s*$/.exec(line)
-    if (m) {
-      current = { sha: m[1], lines: [] }
-      commits.push(current)
-      continue
-    }
-    if (current) current.lines.push(line)
-  }
-  return commits.map((c) => ({ sha: c.sha, message: c.lines.join('\n').trim() })).filter((c) => c.message)
-}
-
-// The intent every agent of the round reads: the user's note, then the
-// author's commit messages verbatim, then the commits earlier rounds of this
-// loop (or of the dead run it relaunches) made, set apart so a restore the
-// review itself committed never reads as the author's decision.
-function buildIntent(authorLog, loopCommits) {
-  const authored = parseLog(authorLog)
+// The scout reads the author's commit messages the way the review's agents
+// do: per path, never the whole range, since a branch or the commits earlier
+// rounds added can run to hundreds and would exhaust its context.
+function scoutIntentText() {
   const parts = []
-  if (INTENT_NOTE) parts.push(INTENT_NOTE)
-  if (authored.length) parts.push(authored.map((c) => `--- ${c.sha.slice(0, 9)}\n${c.message}`).join('\n'))
-  if (loopCommits && loopCommits.length) parts.push(`Commits ${loopCommits.map((sha) => sha.slice(0, 9)).join(', ')} were made by an earlier round of this review loop, not by the author; they carry none of the author's decisions.`)
-  return parts.length ? parts.join('\n\n') : null
+  if (INTENT_NOTE) parts.push(`The author's note on what the diff deliberately does, verbatim:\n<<<\n${INTENT_NOTE}\n>>>`)
+  if (LOOP_START) {
+    const end = LOOP_START.slice(0, 9)
+    if (!LOOP_START.startsWith(BASE) && !BASE.startsWith(LOOP_START)) {
+      parts.push(`The author's commits are ${BASE.slice(0, 9)}..${end}; their messages state what the diff deliberately does. Read the subjects with \`git log --format='%h %s' ${BASE}..${end}\` piped through \`head -n 100\`, and a path's messages with \`git log --format='--- %h%n%B' ${BASE}..${end} -- <paths>\`, never the whole range at once: it can hold hundreds of commits.`)
+    }
+    parts.push(`Every commit after ${end} was made by this review loop, not by the author; never list those.`)
+  }
+  if (!parts.length) return ''
+  return `\nAuthor's intent for this diff:\n${parts.join('\n')}\nThe intent is the baseline the finders test the diff against: a removal it states is a decision they check for breakage, not a loss to audit. Cut the dimensions around what the diff introduced or changed and what that could break.\n`
 }
 
 // The scout is told nothing about earlier rounds: no round number, no earlier
 // split, no list of what the fixes touched. Each round's cut is designed from
 // the scope alone, the way a cleared conversation would design it.
-function scoutPrompt(state, inScope, intent) {
-  const untracked = new Set(state.untracked)
+function scoutPrompt(inScope, untracked) {
   const list = inScope.map((f) => `- ${f}${untracked.has(f) ? ' (untracked: no diff against the base, read whole)' : ''}`).join('\n')
   const sizes = SCOPE === 'codebase'
     ? 'See sizes with `wc -l` on the paths.'
     : `See sizes with \`git diff --stat ${BASE}\`.`
-  const intentText = intent
-    ? `\nAuthor's intent for this diff, verbatim (commit messages, the author's note, or both):\n<<<\n${intent}\n>>>\nThe intent is the baseline the finders test the diff against: a removal it states is a decision they check for breakage, not a loss to audit. Cut the dimensions around what the diff introduced or changed and what that could break.\n`
-    : ''
   return `${CONTEXT}
 
 ${READ_ONLY}
-${intentText}
+${scoutIntentText()}
 You are the SCOUT of an adversarial code review. Design the finder dimensions from the SHAPE of the scope, not its content: which files are in it and how large their change is, which subsystems and layers they belong to, and what you know of the repository (read its agent docs and directory layout as needed; the finders read the hunks themselves).
 
 Files in scope (${inScope.length}):
@@ -420,10 +379,8 @@ function parseCopy(lines, sections) {
   for (const sec of sections) {
     const lines = raw[sec.name]
     if (!lines) return null
-    if (sec.kind === 'text') {
-      value[sec.name] = lines.map((l) => l.trimEnd()).join('\n').trim()
-    } else if (sec.kind === 'hash' || sec.kind === 'commit') {
-      const hash = (sec.kind === 'hash' ? /^\s*([0-9a-f]{64})\b/ : /^\s*([0-9a-f]{40})\b/).exec(lines.find((l) => l.trim()) || '')
+    if (sec.kind === 'hash') {
+      const hash = /^\s*([0-9a-f]{64})\b/.exec(lines.find((l) => l.trim()) || '')
       if (!hash) return null
       value[sec.name] = hash[1]
     } else {
@@ -534,31 +491,23 @@ const allUncommittedFixFiles = new Set()
 const allPossiblyDirty = new Set()
 let stopReason = null
 let stopDetail = null
-let authorEnd = LOOP_START
-let authorLog = null
 
 log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_ROUNDS} review round(s), scout and implementers on ${MODEL || 'the session model'}, simplify afterwards`)
 
 for (let round = 1; round <= MAX_ROUNDS; round++) {
   phase('Scout')
-  const { value: state, error: stateError } = await runCopy(stateSections(round, authorEnd), STATE_WHAT, `state @${round}`, 'Scout', STATE_OPTS)
-  if (!state) {
-    stopReason = 'agent-failed'
-    stopDetail = `round ${round}: ${stateError}`
-    break
-  }
-  if (round === 1) {
-    authorEnd = authorEnd || state.head || null
-    authorLog = state.log || null
-  }
-  const inScope = [...new Set([...state.tracked, ...state.untracked])]
+  // Nothing but this loop's implementers writes to the tree between rounds (a
+  // cleanup that cannot restore it stops the loop), so a round's state is the
+  // launch state plus what the fixes so far touched, and no agent re-reads it.
+  const dirtyAtLaunch = [...new Set([...input.dirtyAtLaunch, ...allUncommittedFixFiles])].sort()
+  const untracked = [...new Set(input.untracked)].sort()
+  const inScope = [...new Set([...input.files, ...untracked, ...allFixes.flatMap((f) => f.files || [])])].sort()
   if (inScope.length === 0) {
     stopReason = 'scope-empty'
     stopDetail = `round ${round} found nothing in scope`
     break
   }
-  const intent = buildIntent(authorLog, state.loopCommits)
-  const scout = await run(scoutPrompt(state, inScope, intent), { label: `scout @${round}`, phase: 'Scout', schema: DIMENSIONS_SCHEMA, ...SCOUT_OPTS })
+  const scout = await run(scoutPrompt(inScope, new Set(untracked)), { label: `scout @${round}`, phase: 'Scout', schema: DIMENSIONS_SCHEMA, ...SCOUT_OPTS })
   if (!scout) {
     stopReason = 'agent-failed'
     stopDetail = `the scout of round ${round} died`
@@ -568,26 +517,27 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   if (missing.length) log(`round ${round}: the scout left ${missing.length} file(s) out of every dimension; a catch-all finder takes them`)
 
   phase('Review')
-  log(`round ${round}: ${dimensions.length} finder(s): ${dimensions.map((d) => d.key).join(', ')}${state.dirtyAtLaunch.length ? `; ${state.dirtyAtLaunch.length} path(s) dirty` : '; tree clean'}`)
+  log(`round ${round}: ${dimensions.length} finder(s): ${dimensions.map((d) => d.key).join(', ')}${dirtyAtLaunch.length ? `; ${dirtyAtLaunch.length} path(s) dirty` : '; tree clean'}`)
   const reviewArgs = {
     scope: SCOPE,
     root: ROOT,
-    dirtyAtLaunch: state.dirtyAtLaunch,
-    untracked: state.untracked,
+    dirtyAtLaunch,
+    untracked,
     dimensions,
     context: input.context,
   }
   if (BASE) reviewArgs.base = BASE
   if (CHECKS) reviewArgs.checks = CHECKS
   if (MODEL) reviewArgs.implementerModel = MODEL
-  if (intent) reviewArgs.intent = intent
+  if (LOOP_START) reviewArgs.authorEnd = LOOP_START
+  if (INTENT_NOTE) reviewArgs.intent = INTENT_NOTE
   const { result: review, error } = await runChild(input.reviewScript, reviewArgs, 'review workflow')
 
   const entry = {
     round,
     dimensions: dimensions.map(({ key, title, files }) => ({ key, title, files })),
     unassignedFiles: missing,
-    dirtyAtLaunch: state.dirtyAtLaunch,
+    dirtyAtLaunch,
     review,
     error,
     triage: null,

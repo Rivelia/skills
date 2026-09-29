@@ -42,16 +42,21 @@ if (input.implementerModel !== undefined && (typeof input.implementerModel !== '
   throw new Error('args.implementerModel: a model name (e.g. opus, sonnet, haiku) when given; omit it to run the implementers on the session model')
 }
 if (input.intent !== undefined && (typeof input.intent !== 'string' || !input.intent.trim())) {
-  throw new Error("args.intent: a non-empty string when given (the branch's commit messages verbatim, the author's note, or both); omit it otherwise")
+  throw new Error("args.intent: a non-empty string when given (the author's note on what the diff deliberately does); omit it otherwise")
+}
+if (input.authorEnd !== undefined && (typeof input.authorEnd !== 'string' || !/^[0-9a-f]{7,40}$/.test(input.authorEnd) || input.scope === 'codebase')) {
+  throw new Error("args.authorEnd: the hex commit the author's commits end at (HEAD at launch), only for a scope with a base; omit it otherwise")
 }
 
 const ROOT = input.root
 const BASE = input.base || null
 const DIMENSIONS = input.dimensions
 const CHECKS = typeof input.checks === 'string' && input.checks.trim() ? input.checks.trim() : null
-// The author's intent: commit messages or a note, verbatim. A removal it states
-// is a decision the finders test for breakage, not a loss to restore.
+// The author's intent: a note, verbatim, and the commits up to authorEnd. A
+// removal it states is a decision the finders test for breakage, not a loss to
+// restore.
 const INTENT = typeof input.intent === 'string' && input.intent.trim() ? input.intent.trim() : null
+const AUTHOR_END = input.authorEnd || null
 // The implementers inherit the session model unless the user picked another; effort stays tied to severity.
 const IMPLEMENTER_MODEL = input.implementerModel ? input.implementerModel.trim() : null
 
@@ -84,12 +89,28 @@ function scopeText() {
   const untracked = input.untracked.length
     ? `\nUntracked files are in scope too and have no diff against the base, so read them whole:\n${input.untracked.map((f) => `- ${f}`).join('\n')}`
     : '\nThere were no untracked files at launch.'
-  return `Review scope: ${SCOPE_LABEL[input.scope]}, i.e. the working tree against base commit ${BASE}. Read a file's hunks with \`git diff ${BASE} -- <path>\`, the pre-change file with \`git show ${BASE}:<path>\`, the file list with \`git diff --stat ${BASE}\`, and the surrounding current code with cat/sed.${untracked}`
+  return `Review scope: ${SCOPE_LABEL[input.scope]}, i.e. the working tree against base commit ${BASE}. Read a file's hunks with \`git diff ${BASE} -- <path>\`, the pre-change file with \`git show ${BASE}:<path>\`, the file list with \`git diff --stat ${BASE}\`, and the surrounding current code with cat/sed. A path in scope whose diff is empty is untracked: read it whole.${untracked}`
 }
 
-const INTENT_TEXT = INTENT
-  ? `\nAuthor's intent for this diff, verbatim (commit messages, the author's note, or both). A removal the intent states is a decision, not a defect, unless it breaks something that still exists:\n<<<\n${INTENT}\n>>>`
-  : ''
+// The commit messages are never pasted: a branch, or the commits earlier
+// rounds of a review loop added, can run to hundreds, and every agent reading
+// all of them would exhaust its context. Each agent reads the author's
+// messages for the paths it works on.
+function intentText() {
+  const parts = []
+  if (INTENT) parts.push(`The author's note on what the diff deliberately does, verbatim:\n<<<\n${INTENT}\n>>>`)
+  if (AUTHOR_END) {
+    const end = AUTHOR_END.slice(0, 9)
+    const authored = AUTHOR_END.startsWith(BASE) || BASE.startsWith(AUTHOR_END)
+      ? 'The author made no commit in scope.'
+      : `The author's commits are ${BASE.slice(0, 9)}..${end}; their messages state what the diff deliberately does. Read them for the paths you work on, \`git log --format='--- %h%n%B' ${BASE}..${end} -- <paths>\`, never for the whole range at once: it can hold hundreds of commits.`
+    parts.push(`${authored} Every commit after ${end} was made by this review (an earlier round of it or this one), not by the author, and carries none of the author's decisions. Never list those commits wholesale either; \`git merge-base --is-ancestor ${end} <sha>\` says whether a commit you meet (in a blame, a file's log) is one of them.`)
+  }
+  if (!parts.length) return ''
+  return `\nAuthor's intent for this diff. A removal the intent states is a decision, not a defect, unless it breaks something that still exists.\n${parts.join('\n')}`
+}
+
+const INTENT_TEXT = intentText()
 
 // Rules both the finders and the materiality skeptic apply, written once so the
 // two cannot drift apart.
