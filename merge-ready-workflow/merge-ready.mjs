@@ -26,6 +26,7 @@ const COUNTED = ['medium', 'high', 'critical']
 // justify another. Each round spends a few dozen agents and the simplify
 // phase spends more, all against the harness's 1000-agent lifetime cap.
 const MAX_ROUNDS = 25
+// Quoted in SKILL.md step 3 so the launching session never opens this script to learn it.
 const DEFAULT_EXCLUDE = '(^|/)(node_modules|vendor|third_party|dist|build|target|generated)/|\\.min\\.|(^|/)(package-lock\\.json|yarn\\.lock|pnpm-lock\\.yaml|Cargo\\.lock|poetry\\.lock|go\\.sum)$|\\.(json|jsonl|csv|tsv|md|mdx|lock|snap|svg|png|jpe?g|gif|ico|webp|pdf|woff2?|ttf|otf|eot|zip|gz|wasm|so|dylib|dll|exe|bin)$'
 
 const input = typeof args === 'string' ? JSON.parse(args) : args
@@ -216,7 +217,7 @@ function triagePrompt(round, candidates, findings, changeKinds) {
     const fix = fixer || c
     const via = fixer ? `\nFixed by the change for finding #${fixer.id} "${fixer.title}", which covers it.` : ''
     const hunks = fix.hunks && fix.hunks.trim() ? `\nHunks:\n${fix.hunks.trim()}` : ''
-    return `Finding #${c.id} [${c.severity}] ${c.title}\nLocation: ${c.file}:${c.line}\nDescription: ${c.description}${via}\nFix: ${fixLocation(fix)}\nKinds reported by the implementer: ${(fix.kinds || []).join(', ') || '(none)'}${hunks}`
+    return `Finding #${c.id} [${c.severity}] ${c.title}\nLocation: ${c.file}:${c.line}\nDescription: ${c.description}${via}\nFix: ${fixLocation(fix)}${hunks}`
   }).join('\n\n')
   return `${CONTEXT}
 
@@ -225,7 +226,7 @@ ${READ_ONLY}
 You are the TRIAGE agent of a looping adversarial code review. Round ${round} just fixed the medium, high and critical findings below. For each one, classify its fix by the kinds of change its hunks contain, from this list. The kinds marked production change what shipped code does at runtime; the others do not:
 ${kindList}
 
-A fix carries every kind its hunks contain: one that changed a comment and a query is comment and logic. The implementer's own kinds are shown for reference; judge from the hunks. Read each fix's hunks (from its commit, or pasted below for a fix left uncommitted), list a production kind only when a hunk changes what shipped code does, and quote that hunk in the reason. One verdict per finding id.
+A fix carries every kind its hunks contain: one that changed a comment and a query is comment and logic. Read each fix's hunks (from its commit, or pasted below for a fix left uncommitted), list a production kind only when a hunk changes what shipped code does, and quote that hunk in the reason. One verdict per finding id.
 
 ${blocks}`
 }
@@ -487,6 +488,14 @@ function normalizeDimensions(raw, inScope) {
   return { dimensions, missing }
 }
 
+function refutedLine(f) {
+  const reason = String(f.refuteReason || '')
+  const end = reason.search(/[.!?](\s|$)/)
+  const first = end >= 0 ? reason.slice(0, end + 1) : reason
+  const { description, refuteReason, ...rest } = f
+  return { ...rest, refuteReason: first.length > 300 ? `${first.slice(0, 300)}…` : first }
+}
+
 // ---------- the loop ----------
 
 const rounds = []
@@ -495,7 +504,6 @@ const allUncommittedFixFiles = new Set()
 const allPossiblyDirty = new Set()
 let stopReason = null
 let stopDetail = null
-let changeKindsTable = null
 let excludedKindsTable = null
 
 log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_ROUNDS} review round(s), scout and implementers on ${MODEL || 'the session model'}, simplify afterwards`)
@@ -557,7 +565,6 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
 
   for (const f of review.uncommittedFixFiles || []) allUncommittedFixFiles.add(f)
   for (const p of review.possiblyDirty || []) allPossiblyDirty.add(p)
-  for (const fx of review.fixes || []) allFixes.push({ round, ...fx })
   const changeKinds = review.changeKinds
   if (!changeKinds || typeof changeKinds !== 'object' || Object.keys(changeKinds).length === 0) {
     stopReason = 'review-failed'
@@ -567,6 +574,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
 
   const findings = review.findings || []
   const fixed = findings.filter((f) => f.outcome === 'fixed')
+  for (const f of fixed) allFixes.push({ round, id: f.id, files: f.files || [] })
   const covered = findings.filter((f) => f.outcome === 'covered')
   const resolved = fixed.length + covered.length
   // A covered finding was closed by its coverer's change, so that change is the
@@ -592,7 +600,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     productiveFinders: productiveFinders.size,
   }
 
-  const triage = { candidates: candidates.map((f) => f.id), verdicts: [], failed: false, productionIds: [] }
+  const triage = { candidates: candidates.map((f) => f.id), failed: false, productionIds: [] }
   if (candidates.length) {
     phase('Triage')
     const t = await run(triagePrompt(round, candidates, findings, changeKinds), { label: `triage @${round}`, phase: 'Triage', schema: triageSchema(changeKinds), ...TRIAGE_OPTS })
@@ -602,23 +610,22 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
       log(`round ${round}: the triage agent died; every medium-or-higher fix is assumed to have changed production behaviour`)
     } else {
       const isProduction = (v) => v.kinds.some((k) => changeKinds[k] && changeKinds[k].production)
-      triage.verdicts = t.verdicts
-        .filter((v) => candidates.some((f) => f.id === v.id))
-        .map((v) => ({ id: v.id, kinds: v.kinds, production: isProduction(v), reason: v.reason }))
-      triage.productionIds = triage.verdicts.filter((v) => v.production).map((v) => v.id)
+      triage.productionIds = t.verdicts
+        .filter((v) => candidates.some((f) => f.id === v.id) && isProduction(v))
+        .map((v) => v.id)
     }
   }
   entry.triage = triage
   // The result lands in the launching session whole, every round of it, so
   // what the report never reads leaves once triage has read the hunks: the
-  // hunks and check logs, and the kind tables, which every round repeats.
-  if (!changeKindsTable) changeKindsTable = changeKinds
+  // hunks, the kind tables every round repeats, and all of a refuted finding
+  // but its title, skeptic and first sentence.
   if (!excludedKindsTable && review.excludedKinds) excludedKindsTable = review.excludedKinds
   entry.review = {
     ...review,
     changeKinds: undefined,
     excludedKinds: undefined,
-    findings: findings.map(({ hunks, checks, ...f }) => f),
+    findings: findings.map(({ hunks, ...f }) => (f.status === 'refuted' ? refutedLine(f) : f)),
   }
 
   const reasons = []
@@ -702,12 +709,10 @@ return {
   checksConfigured: CHECKS !== null,
   checkCmdConfigured: CHECK_CMD !== null,
   maxRounds: MAX_ROUNDS,
-  changeKinds: changeKindsTable,
   excludedKinds: excludedKindsTable,
   stopReason,
   stopDetail,
   rounds,
-  fixes: allFixes,
   uncommittedFixFiles: [...allUncommittedFixFiles],
   possiblyDirty: [...allPossiblyDirty],
   simplify,

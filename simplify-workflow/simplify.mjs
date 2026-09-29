@@ -1066,8 +1066,9 @@ Remove every removal candidate with Read + Edit: remove only the comment (and it
   prune = { stopReason: 'skipped-simplify-unstable' }
 }
 
-// The report conditions the orchestrator would otherwise derive from the fields
-// below, computed once here so every caller reads the same answer.
+// Every caveat the report must state, worded here from the fields that decide
+// it, so the orchestrator relays sentences instead of evaluating a table of
+// conditions and the result carries none of the fields they were built from.
 const fullPrune = prune.stopReason !== 'skipped-simplify-unstable'
 const edited = allChanges.length > 0 || globalSeen.size > 1 || (fullPrune && (prune.removed > 0 || prune.distinctTreeStates > 0))
 const editPossible = stopReason === 'hash-unavailable' || (fullPrune && prune.stopReason === 'hash-unavailable')
@@ -1076,6 +1077,60 @@ const unverified = (fullPrune && verificationLost(prune.verificationStatus))
   || (verificationLost(simplifyVerification) && !(fullPrune && prune.verificationStatus === 'ran'))
 const noCheck = simplifyVerification === 'not-configured' && (edited || editPossible)
 
+const reportLines = []
+const say = (text, prominent = false) => reportLines.push({ text, prominent })
+const paths = (files) => files.map(f => `\`${f}\``).join(', ')
+
+if (stopReason === 'all-batches-abandoned') {
+  say('Every batch was abandoned because its agents kept dying or were skipped, so the scope was never analysed at all: nothing converged, and nothing is known about the shape of the code.', true)
+}
+if (stopReason === 'all-batches-abandoned-after-progress') {
+  say('The loop stopped because every remaining batch\'s agents kept dying or were skipped, so convergence was never confirmed.')
+  say(globalSeen.size > 1 ? 'The tree was left edited.' : 'Earlier rounds analysed part of the scope without recording any change.')
+}
+function unsettled(phaseName, reason, changed) {
+  if (reason === 'max-iterations') say(`The ${phaseName} phase did not settle within ${MAX_ROUNDS} rounds; the summary covers the work done so far.`)
+  else if (reason === 'hash-unavailable') say(`The hash agent could not return a hash during the ${phaseName} phase, so its convergence could not be confirmed; the summary covers the work done so far.`)
+  else return
+  if (changed) say('The tree was edited.')
+  else if (reason === 'max-iterations') say('Nothing was recorded as changed, and the final state could not be confirmed.')
+  else say('Nothing was recorded as changed, an edit could not be ruled out, and the final state could not be confirmed.')
+}
+unsettled('simplify', stopReason, allChanges.length > 0 || globalSeen.size > 1)
+if (!fullPrune) {
+  say(`Comment pruning was skipped because simplification never converged: it stopped on \`${stopReason}\`.`)
+} else {
+  unsettled('prune', prune.stopReason, prune.removed > 0 || prune.distinctTreeStates > 0)
+  const unfinished = prune.batchesTotal - prune.batchesDone
+  if (prune.stopReason === 'incomplete-dead-agent') say(`Pruning stopped with ${unfinished} batch(es) unfinished because its agents kept dying; their comments were not audited.`)
+  if (prune.stopReason === 'converged') say(`The tree stopped moving while prune batches were still active, so the remaining ${unfinished} batch(es) never produced a clean pass.`)
+  if (prune.unauditedFiles.length) say(`The comments in these files may not be fully audited, since the prune agents for their batch died or were skipped and it never produced a clean pass: ${paths(prune.unauditedFiles)}.`)
+}
+if (unanalyzedFiles.length) {
+  say(`These files were never analysed because their batch's agents kept dying or were skipped${stopReason === 'all-batches-abandoned' ? '' : ', so the rest of the scope could still converge'}: ${paths(unanalyzedFiles)}.`)
+}
+if (abandonedAfterProgress.length) {
+  say(`These files' batch was dropped after repeated agent deaths, so the loop never confirmed they had settled and the scope as a whole cannot be said to have converged: ${paths(abandonedAfterProgress)}.`)
+}
+if (discoveryFailed) say('The workflow could not list the files created during the run, so any an apply agent created without reporting were neither pruned nor verified.')
+else if (undeclaredFiles.length) say(`An apply agent created these files without reporting them, so they were never simplified: ${paths(undeclaredFiles)}.`)
+if (unverified) {
+  say(`The project was never verified: run the check command manually${outstandingFailures.length ? '' : '; an empty list of check failures proves nothing'}.`, true)
+  if (edited) say('The project was edited without verification.', true)
+  else if (editPossible) say('An edit cannot be ruled out and was not verified.', true)
+}
+if (simplifyVerification === 'fixup-died' && fullPrune && prune.verificationStatus === 'ran') {
+  say('The mid-run verification died, but the prune fix-up re-ran the same check on the final tree, so the final tree was verified.')
+}
+if (baselineFailures.length > 0 || baselineFailing) {
+  say('The project\'s check was already failing before the run; those failures were left alone and are still there, so no new failure means only that the run caused none. The project does not pass its check.')
+}
+if (noCheck) {
+  say('No check command could be found for this project, so the absence of check failures means nothing: verify the tree before relying on or committing it.', true)
+  if (edited) say('The edits were never verified by anything.', true)
+  else if (editPossible) say('Anything the run may have edited was never verified.', true)
+}
+
 const summary = {}
 for (const group of GROUPS) summary[group] = []
 for (const change of allChanges) {
@@ -1083,27 +1138,23 @@ for (const change of allChanges) {
   summary[group].push({ description: change.description, files: change.files })
 }
 
+// A long run can reject hundreds of proposals, each relayed whole; past the
+// cap the report gives only the count.
+const REJECTED_SHOWN = 25
+
 return {
-  scope: input.scope,
   iterations,
   sweeps,
   stopReason,
-  distinctTreeStates: globalSeen.size - 1,
   findingsProposed: proposedTotal,
   findingsApproved: approvedTotal,
-  rejectedFindings: allRejected,
   changesApplied: allChanges.length,
-  undeclaredFiles,
-  unanalyzedFiles,
-  abandonedAfterProgress,
-  discoveryFailed,
+  rejectedTotal: allRejected.length,
+  rejectedFindings: allRejected.slice(0, REJECTED_SHOWN).map(({ description, files, reason }) => ({ description, files, reason })),
   unresolvedCheckFailures: outstandingFailures,
-  verificationStatus: simplifyVerification,
-  // A pre-existing failure is never attributed to the run, so an empty
-  // `unresolvedCheckFailures` cannot say the check passes when the baseline
-  // was already failing.
-  checkBaselineFailing: baselineFailures.length > 0 || baselineFailing,
-  prune,
-  reportFlags: { fullPrune, edited, editPossible, unverified, noCheck },
+  prune: fullPrune
+    ? { iterations: prune.iterations, stopReason: prune.stopReason, removed: prune.removed, batchesDone: prune.batchesDone, batchesTotal: prune.batchesTotal }
+    : { stopReason: prune.stopReason },
+  reportLines,
   summary,
 }

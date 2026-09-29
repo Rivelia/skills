@@ -125,9 +125,9 @@ const UNPROMPTED_BEHAVIOUR = 'working autonomously, batching calls, summarising 
 const NON_INFERABLE_CONTRACT = 'a format, a limit, a fact about the environment, what the tool accepts or returns'
 const HOLLOW_TEST = "recomputes the implementation's formula from the same constants, or asserts what a stub or hand-written mock returns"
 
-// Clustering and the sibling check judge neither severity nor intent, and the
-// implementer works from a settled severity, so each agent gets only the parts
-// it uses.
+// Clustering, the sibling check and the technical skeptic judge neither
+// severity nor intent, and the implementer works from a settled severity, so
+// each agent gets only the parts it uses.
 const PROJECT = `Repository: ${ROOT}.
 ${input.context.trim()}
 ${scopeText()}`
@@ -141,10 +141,9 @@ const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit
 // nothing to knowing which angle is whose.
 const DIMENSION_LIST = DIMENSIONS.map((d) => `- ${d.key}: ${d.title}`).join('\n')
 
-// One vocabulary for what a fix is made of. The implementer reports its fix in
-// these kinds, and the merge-ready triage judges a fix in the same ones, reading
-// the table from this script's result. `production` marks the kinds that change
-// what shipped code does at runtime.
+// One vocabulary for what a fix is made of, which the merge-ready triage judges
+// each fix's hunks in, reading the table from this script's result.
+// `production` marks the kinds that change what shipped code does at runtime.
 const CHANGE_KINDS = {
   logic: { production: true, text: 'a change to what shipped code does: application logic, data handling, queries, API handlers, UI behaviour; a helper local to the file it fixes is part of it' },
   config: { production: true, text: 'configuration the running product reads' },
@@ -160,8 +159,6 @@ const CHANGE_KINDS = {
   test: { production: false, text: 'tests, fixtures and test helpers, added or updated' },
   'ci-build': { production: false, text: 'existing CI or build configuration' },
 }
-const CHANGE_KEYS = Object.keys(CHANGE_KINDS)
-const CHANGE_KINDS_TEXT = `Report the kinds of change in your fix from this list, by key, every kind the hunks contain:\n${CHANGE_KEYS.map((k) => `- ${k}: ${CHANGE_KINDS[k].text}`).join('\n')}`
 
 // The kinds of fix never auto-applied, each with the key the implementer
 // reports when it refuses one. These are the only grounds for refusing a fix.
@@ -265,14 +262,13 @@ const IMPL_SCHEMA = {
     reason: { type: 'string', description: 'Why you did or did not apply it: applied / excluded kind (which, and what in the fix triggers it) / covered / which check could not pass.' },
     excludedKind: { type: ['string', 'null'], enum: [...EXCLUSION_KEYS, null], description: 'For not_applied: the key of the excluded kind that applies; null for every other outcome.' },
     files: { type: 'array', items: { type: 'string' }, description: 'Repo-relative paths you changed or created (empty unless outcome is applied).' },
-    kinds: { type: 'array', items: { type: 'string', enum: CHANGE_KEYS }, description: 'Every kind of change in your fix, by key from the list in the prompt; empty unless outcome is applied.' },
     hunks: { type: 'string', description: 'The `git diff` of your change when you left it uncommitted; empty when you committed it (the commit carries it) and unless outcome is applied.' },
     checks: { type: 'array', items: { type: 'object', properties: { command: { type: 'string' }, result: { type: 'string' } }, required: ['command', 'result'] } },
     committed: { type: 'boolean' },
     commitSha: { type: ['string', 'null'] },
     notes: { type: 'string', description: 'Anything beyond the finding that a more complete fix would need.' },
   },
-  required: ['outcome', 'plan', 'reason', 'excludedKind', 'files', 'kinds', 'hunks', 'checks', 'committed', 'commitSha', 'notes'],
+  required: ['outcome', 'plan', 'reason', 'excludedKind', 'files', 'hunks', 'checks', 'committed', 'commitSha', 'notes'],
 }
 
 const SIBLING_SCHEMA = {
@@ -381,7 +377,7 @@ Do not judge technical truth here (a later skeptic does); assume the mechanism i
 }
 
 function technicalPrompt(e) {
-  return `${CONTEXT}
+  return `${PROJECT}
 
 ${READ_ONLY}
 
@@ -411,7 +407,7 @@ The lead of a cluster is the finding whose location is where the single change g
 Read the code at each location before deciding. Every finding id must appear in exactly one cluster (a singleton cluster is fine).
 
 Confirmed findings:
-${confirmed.map((e) => findingText(e)).join('\n\n')}`
+${confirmed.map((e) => `Finding #${e.id} [${e.finalSeverity}] ${e.finalTitle ?? e.title}\nLocation: ${e.file}:${e.line}\nDescription: ${e.finalDescription ?? e.description}`).join('\n\n')}`
 }
 
 // Files an implementer must never sweep into a commit or restore with git:
@@ -456,7 +452,6 @@ ${findingText(e)}
 ${sibText}
 Plan your own fix: read the code around the finding (if the defect can no longer occur, change nothing and return outcome=covered), decide the smallest change that closes it (severity ${sev}), then check that change against the excluded kinds:
 ${EXCLUDED}
-${CHANGE_KINDS_TEXT}
 
 Minimal is relative to the finding, not to any larger plan: when a more complete fix exists beyond the finding, close the finding and describe the rest in notes. Never extend a fix to a sibling component the finding did not name (that is a new finding). Follow the project's agent docs for any code or test you write; a test must never add complexity to production code (no test-only parameters, seams or exports), never assert a still-present bug, and never read source as text. A finding whose only defect is a missing test is fixed by adding that test. When a comment, doc or tool description warns about a defect in code, fix the code, not the warning.
 
@@ -466,7 +461,7 @@ Otherwise: make the change. ${checksText()}
 
 Commit rule: when none of the files you changed or created is protected, commit the fix yourself: \`git add <exactly your files>\`, then \`git commit\` with a message in the project's commit convention (from the context above; default \`type(scope): subject\`), with no attribution lines or trailers; report committed=true and the sha. When any file you changed is protected, leave the whole fix uncommitted and report committed=false: never commit a whole file to get around the overlap.
 
-Report outcome=applied with exactly the files you changed, your own hunks pasted only when the fix stays uncommitted (a protected file's diff also holds the user's work), the kinds of change by key, every check command with its result, and the commit state. Finish with \`git status --porcelain\` and make sure your report matches it: nothing of yours may remain in the tree after not_applied, covered or reverted.`
+Report outcome=applied with exactly the files you changed, your own hunks pasted only when the fix stays uncommitted (a protected file's diff also holds the user's work), every check command with its result, and the commit state. Finish with \`git status --porcelain\` and make sure your report matches it: nothing of yours may remain in the tree after not_applied, covered or reverted.`
 }
 
 function siblingPrompt(s, lead, fix) {
@@ -729,6 +724,40 @@ if (clusters.length > 0) {
 
 log(`done: ${registry.filter((e) => e.outcome === 'fixed').length} fixed, ${registry.filter((e) => e.outcome === 'covered').length} covered, ${registry.filter((e) => e.outcome === 'not_fixed').length} confirmed not auto-fixed, ${registry.filter((e) => e.outcome === 'reverted').length} reverted, ${registry.filter((e) => e.status === 'agent_failed' || e.outcome === 'agent_failed').length} agent-failed, ${registry.filter((e) => e.status === 'refuted').length} refuted, ${finderFailures.length} finder(s) failed`)
 
+// Each finding carries only the fields its outcome is reported by: the result
+// lands whole in the launching session, every round of it under merge-ready.
+function reported(e) {
+  const f = {
+    id: e.id,
+    dimension: e.dimension,
+    title: e.finalTitle ?? e.title,
+    file: e.file,
+    line: e.line,
+    severity: e.finalSeverity ?? e.severity,
+    description: e.finalDescription ?? e.description,
+    status: e.status,
+  }
+  if (e.corrected) f.corrected = true
+  if (e.alsoReportedBy.length) f.alsoReportedBy = e.alsoReportedBy
+  if (e.status === 'refuted') Object.assign(f, { refutedBy: e.refutedBy, refuteReason: e.refuteReason })
+  if (e.failedAt) f.failedAt = e.failedAt
+  if (!e.outcome) return f
+  f.outcome = e.outcome
+  const impl = e.implementation
+  if (e.outcome === 'fixed') {
+    Object.assign(f, { commitSha: e.commitSha, files: impl.files, notes: impl.notes })
+    // The merge-ready triage reads an uncommitted fix's hunks; a commit carries its own.
+    if (!e.committed && impl.hunks) f.hunks = impl.hunks
+  } else if (e.outcome === 'covered') {
+    f.coveredBy = e.coveredBy ?? null
+  } else if (e.outcome === 'not_fixed') {
+    Object.assign(f, { excludedKind: impl.excludedKind, plan: impl.plan })
+  } else if (e.outcome === 'reverted') {
+    Object.assign(f, { reason: impl.reason, plan: impl.plan })
+  }
+  return f
+}
+
 return {
   scope: input.scope,
   implementerModel: IMPLEMENTER_MODEL,
@@ -737,35 +766,7 @@ return {
   changeKinds: CHANGE_KINDS,
   excludedKinds: EXCLUSIONS,
   finderFailures,
-  clusters,
-  fixes: priorFixes,
   uncommittedFixFiles: [...uncommittedFixFiles],
   possiblyDirty: [...possiblyDirty],
-  findings: registry.map((e) => ({
-    id: e.id,
-    dimension: e.dimension,
-    title: e.finalTitle ?? e.title,
-    file: e.file,
-    line: e.line,
-    severity: e.finalSeverity ?? e.severity,
-    description: e.finalDescription ?? e.description,
-    corrected: e.corrected === true,
-    status: e.status,
-    refutedBy: e.refutedBy ?? null,
-    refuteReason: e.refuteReason ?? null,
-    failedAt: e.failedAt ?? null,
-    alsoReportedBy: e.alsoReportedBy,
-    outcome: e.outcome ?? null,
-    committed: e.committed ?? null,
-    commitSha: e.commitSha ?? null,
-    files: e.implementation ? e.implementation.files : null,
-    kinds: e.implementation ? e.implementation.kinds : null,
-    hunks: e.implementation ? e.implementation.hunks : null,
-    checks: e.implementation ? e.implementation.checks : null,
-    plan: e.implementation ? e.implementation.plan : null,
-    reason: e.implementation ? e.implementation.reason : null,
-    excludedKind: e.implementation ? e.implementation.excludedKind : null,
-    notes: e.implementation ? e.implementation.notes : null,
-    coveredBy: e.coveredBy ?? null,
-  })),
+  findings: registry.map(reported),
 }

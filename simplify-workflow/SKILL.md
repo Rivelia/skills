@@ -5,14 +5,14 @@ argument-hint: "<uncommitted|branch|unpushed|codebase> [model effort]"
 disable-model-invocation: true
 ---
 
-A Workflow converges the scoped code to a stable simplified form. Each round runs find, judge, apply over batches of files: fresh finders propose, independent judges strike what is not a genuine improvement, and appliers implement only what survives. Rounds repeat until a confirmation sweep applies nothing and the tree hash lands on an already-seen state. A comment-pruning phase follows convergence. You orchestrate from outside the loop: resolve the inputs, launch the workflow, relay its result. The loop mechanics, embedded prompts, and comment-classification rules live in [simplify.mjs](simplify.mjs) in this skill's folder.
+A Workflow converges the scoped code to a stable simplified form. Each round runs find, judge, apply over batches of files: fresh finders propose, independent judges strike what is not a genuine improvement, and appliers implement only what survives. Rounds repeat until a confirmation sweep applies nothing and the tree hash lands on an already-seen state. A comment-pruning phase follows convergence. You orchestrate from outside the loop: resolve the inputs, launch the workflow, relay its result. The loop mechanics, embedded prompts, and comment-classification rules live in [simplify.mjs](simplify.mjs) in this skill's folder; running it needs nothing from inside it.
 
 ## Steps
 
 1. **Resolve the arguments.** Parse them in this exact order; every "ask the user" below means ask and stop, without launching anything.
    - The first argument is the scope and must be exactly one of `uncommitted`, `branch`, `unpushed`, `codebase`; if it is missing or anything else, ask the user which scope to use.
    - After the scope, what remains must be nothing, `[model]`, or `[model] [effort]`, in that order and nothing else.
-   - The model must be a plausible model name (e.g. `opus`, `sonnet`, `haiku`). If the token after the scope is not a model name, ask the user what they meant. An effort is one of `low`, `medium`, `high`, `xhigh`, `max`. If a model is given without a following effort, ask the user which effort to use; the model/effort pairing is the user's call, never defaulted. The override drives the find, apply and prune agents; the judge and the verify agents keep the fixed models set in [simplify.mjs](simplify.mjs).
+   - The model must be a plausible model name (e.g. `opus`, `sonnet`, `haiku`). If the token after the scope is not a model name, ask the user what they meant. An effort is one of `low`, `medium`, `high`, `xhigh`, `max`. If a model is given without a following effort, ask the user which effort to use; the model/effort pairing is the user's call, never defaulted. The override drives the find, apply and prune agents; the judge and the verify agents keep their fixed models (Opus for the judge and the fix-up, Sonnet for the check runs).
    - Any further leftover argument: ask the user what it means.
 
 2. **Build the hash command** for the scope. This exact string is the single source of truth for change detection: you run it once for the baseline, and the workflow reruns it verbatim as the convergence gate every iteration.
@@ -96,6 +96,6 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
 
    Pass `files`, `untrackedBaseline`, `pruneFiles`, `pruneUntrackedFiles`, and `pruneExts` as real JSON arrays, not JSON-encoded strings. Every array is required: pass `[]` when the working tree has no untracked files or a prune list has no candidates. The script also accepts an optional `applyModel`, a model for the appliers only, which otherwise inherit the session's model; the appliers run at medium effort either way; the merge-ready workflow passes it, this skill never does.
 
-   **If the run dies** (a session limit, a killed task), never resume it with `resumeFromRunId`, whatever the harness suggests (the reason is in [simplify.mjs](simplify.mjs)). Relaunch from step 1 instead; every input is recomputed from the current tree.
+   **If the run dies** (a session limit, a killed task), never resume it with `resumeFromRunId`, whatever the harness suggests: the judges and appliers start in the order the finders finish, so the cache misses partway through and the rest re-run live against a tree that already holds the edits. Relaunch from step 1 instead; every input is recomputed from the current tree.
 
 8. **Report** the result by [REPORT.md](REPORT.md) in this skill's folder. Leave the changes uncommitted.
