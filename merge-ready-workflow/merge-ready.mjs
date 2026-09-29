@@ -378,12 +378,11 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     confirmed: findings.filter((f) => f.status === 'confirmed').length,
     fixed: fixed.length,
     covered: covered.length,
-    resolved,
     resolvedMediumOrHigher: candidates.length,
     productiveFinders: productiveFinders.size,
   }
 
-  const triage = { candidates: candidates.map((f) => f.id), failed: false, productionIds: [] }
+  const triage = { failed: false, productionIds: [] }
   if (candidates.length) {
     phase('Triage')
     const t = await run(triagePrompt(round, candidates, findings), { label: `triage @${round}`, phase: 'Triage', schema: TRIAGE_SCHEMA, ...TRIAGE_OPTS })
@@ -400,14 +399,18 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   }
   entry.triage = triage
   // The result lands in the launching session whole, every round of it, so
-  // what the report never reads leaves once triage has read the hunks: the
-  // hunks, the fields the loop-wide notes report once for every round, the
-  // exclusion table every round repeats, and all of a refuted finding's reason
-  // but its first sentence.
+  // what the report never reads leaves once the loop and the triage have read
+  // it: the hunks, the finder a finding came from, a committed fix's files (its
+  // commit carries them), the fields the loop-wide notes report once for every
+  // round, the exclusion table every round repeats, and all of a refuted
+  // finding's reason but its first sentence.
   Object.assign(excludedKindsTable, review.excludedKinds)
   entry.review = {
     finderFailures: review.finderFailures,
-    findings: findings.map(({ hunks, ...f }) => (f.status === 'refuted' ? refutedLine(f) : f)),
+    findings: findings.map(({ hunks, dimension, ...f }) => {
+      if (f.commitSha) delete f.files
+      return f.status === 'refuted' ? refutedLine(f) : f
+    }),
   }
 
   const reasons = []
@@ -421,7 +424,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     reasons.push(`finder(s) ${review.finderFailures.join(', ')} failed, so their dimension was never reviewed`)
   }
   const blocked = (review.possiblyDirty || []).length > 0
-  entry.decision = { counts, reasons, continue: reasons.length > 0 && !blocked }
+  entry.decision = { counts, reasons }
 
   if (blocked) {
     stopReason = 'possibly-dirty'
@@ -431,10 +434,10 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   }
   if (reasons.length === 0) {
     stopReason = 'converged'
-    log(`round ${round}: ${counts.resolved} issue(s) resolved, ${counts.resolvedMediumOrHigher} of them medium or higher from ${counts.productiveFinders} of ${counts.finders} finder(s), none of those in production code; the review loop is done`)
+    log(`round ${round}: ${resolved} issue(s) resolved, ${counts.resolvedMediumOrHigher} of them medium or higher from ${counts.productiveFinders} of ${counts.finders} finder(s), none of those in production code; the review loop is done`)
     break
   }
-  log(`round ${round}: ${counts.resolved} issue(s) resolved by ${counts.finders} finder(s); another round because ${reasons.join('; ')}`)
+  log(`round ${round}: ${resolved} issue(s) resolved by ${counts.finders} finder(s); another round because ${reasons.join('; ')}`)
 }
 if (!stopReason) {
   stopReason = 'max-rounds'
@@ -473,8 +476,6 @@ return {
   base: BASE,
   model: MODEL || null,
   checksConfigured: CHECKS !== null,
-  checkCmdConfigured: CHECK_CMD !== null,
-  maxRounds: MAX_ROUNDS,
   excludedKinds: excludedKindsTable,
   stopReason,
   stopDetail,
