@@ -1376,9 +1376,16 @@ for (const change of allChanges) {
   summary[group].push({ description: change.description, files: change.files })
 }
 
-// A long run can reject hundreds of proposals, each relayed whole; past the
-// cap the report gives only the count.
-const REJECTED_SHOWN = 25
+// A long run can reject hundreds of proposals; the report relays the first
+// few, each by its first sentence, and past the cap gives only the count.
+const REJECTED_SHOWN = 10
+
+function firstSentence(text) {
+  const s = String(text || '')
+  const end = s.search(/[.!?](\s|$)/)
+  const first = end >= 0 ? s.slice(0, end + 1) : s
+  return first.length > 300 ? `${first.slice(0, 300)}…` : first
+}
 
 return {
   iterations,
@@ -1388,7 +1395,7 @@ return {
   findingsApproved: approvedTotal,
   changesApplied: allChanges.length,
   rejectedTotal: allRejected.length,
-  rejectedFindings: allRejected.slice(0, REJECTED_SHOWN).map(({ description, files, reason }) => ({ description, files, reason })),
+  rejectedFindings: allRejected.slice(0, REJECTED_SHOWN).map(({ description, files, reason }) => ({ description: firstSentence(description), files, reason })),
   unresolvedCheckFailures: outstandingFailures,
   prune: fullPrune
     ? { iterations: prune.iterations, stopReason: prune.stopReason, removed: prune.removed, batchesDone: prune.batchesDone, batchesTotal: prune.batchesTotal }

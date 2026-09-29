@@ -9,7 +9,7 @@ A Workflow reviews the scoped code: one finder per dimension, two skeptics per f
 
 ## Steps
 
-1. **Resolve the arguments.** The first must be exactly one of `uncommitted`, `branch`, `unpushed`, `codebase`; if it is missing or anything else, ask the user which scope to use and stop without launching anything. An optional second argument is a model for the implementers, the only agents that run on it; without it they inherit the session's model. It is a plausible model name such as `opus`, `sonnet` or `haiku`. If the token after the scope is not a model name, ask the user what they meant and stop. The effort is not an argument: it stays tied to the finding's severity. Any further argument: ask the user what it means and stop.
+1. **Resolve the arguments.** The first must be exactly one of `uncommitted`, `branch`, `unpushed`, `codebase`; if it is missing or anything else, ask the user which scope to use and stop without launching anything. An optional second argument is a model for the implementers, the only agents that run on it; without it they inherit the session's model. It is a plausible model name such as `opus`, `sonnet` or `haiku`. If the token after the scope is not a model name, ask the user what they meant and stop. Any further argument: ask the user what it means and stop.
 
    Resolve `base`, the commit bounding the diff:
    - `uncommitted`: `git rev-parse HEAD`.

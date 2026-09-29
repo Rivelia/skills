@@ -212,7 +212,7 @@ function triagePrompt(round, candidates, findings) {
     const hunks = fix.hunks && fix.hunks.trim() ? `\nHunks:\n${fix.hunks.trim()}` : ''
     return `Finding #${c.id} [${c.severity}] ${c.title}\nLocation: ${c.file}:${c.line}${via}\nFix: ${fixLocation(fix)}${hunks}`
   }).join('\n\n')
-  return `${CONTEXT}
+  return `Repository: ${ROOT}.
 
 ${READ_ONLY}
 
@@ -465,13 +465,6 @@ function normalizeDimensions(raw, inScope) {
   return { dimensions, missing }
 }
 
-function refutedLine(f) {
-  const reason = String(f.refuteReason || '')
-  const end = reason.search(/[.!?](\s|$)/)
-  const first = end >= 0 ? reason.slice(0, end + 1) : reason
-  return { ...f, refuteReason: first.length > 300 ? `${first.slice(0, 300)}…` : first }
-}
-
 // ---------- the loop ----------
 
 const rounds = []
@@ -520,6 +513,7 @@ for (let round = 1; launch && round <= MAX_ROUNDS; round++) {
     untracked,
     dimensions,
     context: input.context,
+    returnHunks: true,
   }
   if (BASE) reviewArgs.base = BASE
   if (CHECKS) reviewArgs.checks = CHECKS
@@ -588,14 +582,13 @@ for (let round = 1; launch && round <= MAX_ROUNDS; round++) {
   // what the report never reads leaves once the loop and the triage have read
   // it: the hunks, the finder a finding came from, a committed fix's files (its
   // commit carries them), the fields the loop-wide notes report once for every
-  // round, the exclusion table every round repeats, and all of a refuted
-  // finding's reason but its first sentence.
+  // round, and the exclusion table every round repeats.
   Object.assign(excludedKindsTable, review.excludedKinds)
   entry.review = {
     finderFailures: review.finderFailures,
     findings: findings.map(({ hunks, dimension, ...f }) => {
       if (f.commitSha) delete f.files
-      return f.status === 'refuted' ? refutedLine(f) : f
+      return f
     }),
   }
 

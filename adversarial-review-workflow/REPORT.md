@@ -8,7 +8,7 @@ Report every finding in six categories, ordered by severity within each:
 - confirmed but not auto-fixed, saying which excluded kind it was (`excludedKind`), in the words of `excludedKinds`, with the implementer's `plan`;
 - fix attempted but reverted, with the check that could not pass (`reason`) and the `plan`;
 - never attempted because an agent failed, naming the agent (`failedAt`);
-- refuted, with the skeptic (`refutedBy`) and its `refuteReason`.
+- refuted, with the skeptic (`refutedBy`) and its `refuteReason`, the first sentence of its reason.
 
 Number the findings continuously across the whole report so each can be quoted by its number. Say when a finding carries `corrected`: the technical skeptic rewrote its description. When `implementerModel` is not null, say which model applied the fixes. `alsoReportedBy`, present only when non-empty, lists the finders whose duplicate the dedup attached at intake; report them under the primary as "also reported by", without a number of their own. Then:
 - `finderFailures` non-empty: state prominently that those dimensions were never reviewed, naming them, and make no claim that the scope was covered.

@@ -47,6 +47,9 @@ for (const d of input.dimensions) {
 if (typeof input.context !== 'string' || !input.context.trim()) {
   throw new Error('args.context: a string describing the project (stack, agent docs to quote, commit convention) is required')
 }
+if (input.returnHunks !== undefined && typeof input.returnHunks !== 'boolean') {
+  throw new Error('args.returnHunks: true to return an uncommitted fix\'s hunks (merge-ready\'s triage reads them); omit it otherwise')
+}
 if (input.implementerModel !== undefined && (typeof input.implementerModel !== 'string' || !input.implementerModel.trim())) {
   throw new Error('args.implementerModel: a model name (e.g. opus, sonnet, haiku) when given; omit it to run the implementers on the session model')
 }
@@ -158,11 +161,13 @@ const EXCLUSIONS = {
 const EXCLUSION_KEYS = Object.keys(EXCLUSIONS)
 const EXCLUDED = `Never auto-applied; report the key as excludedKind:\n${EXCLUSION_KEYS.map((k) => `- ${k}: ${EXCLUSIONS[k]}`).join('\n')}`
 
-function findingText(e) {
+// The skeptics and the sibling check judge the defect, not how to fix it, so
+// they get the finding without the finder's suggested fix.
+function findingText(e, withFix = true) {
   const sev = e.finalSeverity ?? e.severity
   const title = e.finalTitle ?? e.title
   const desc = e.finalDescription ?? e.description
-  return `Finding #${e.id} [${sev}] ${title}\nLocation: ${e.file}:${e.line}\nDescription: ${desc}\nEvidence: ${e.evidence}\nSuggested fix: ${e.suggestedFix}`
+  return `Finding #${e.id} [${sev}] ${title}\nLocation: ${e.file}:${e.line}\nDescription: ${desc}\nEvidence: ${e.evidence}${withFix ? `\nSuggested fix: ${e.suggestedFix}` : ''}`
 }
 
 // A confirmed finding without the finder's evidence and suggested fix, for the
@@ -343,7 +348,7 @@ ${READ_ONLY}
 
 You are the MATERIALITY skeptic in an adversarial code review. Your job is to attack whether this finding matters, refuting by default when uncertain about its substance.
 
-${findingText(e)}
+${findingText(e, false)}
 
 Your verdict is four-way:
 - refute: the finding's substance fails. Valid grounds, and no others:
@@ -372,7 +377,7 @@ ${READ_ONLY}
 
 You are the TECHNICAL skeptic in an adversarial code review. Your job is to attack whether this finding is technically true, refuting by default when uncertain whether the failure mechanism is real at all. A materiality skeptic already confirmed it matters at severity ${e.finalSeverity}.
 
-${findingText(e)}
+${findingText(e, false)}
 
 Verify it yourself: read the code at the location and along the path the finding names, read library sources when the claim depends on their behaviour, and run a small experiment from /tmp or an existing test when that settles it. Do not take the finder's evidence on trust. Try to construct the concrete input or sequence; if it cannot happen, refute.
 
@@ -459,7 +464,7 @@ Lead finding:
 ${briefText(lead)}
 
 Sibling finding to check:
-${findingText(s)}
+${findingText(s, false)}
 
 Read the applied hunks and the sibling's location in its current state. Answer covered=true only if the defect the sibling describes can no longer occur after the fix. If it still can, answer covered=false with what remains, and it will get its own implementer.`
 }
@@ -896,6 +901,15 @@ if (clusters.length > 0) {
 
 log(`done: ${registry.filter((e) => e.outcome === 'fixed').length} fixed, ${registry.filter((e) => e.outcome === 'covered').length} covered, ${registry.filter((e) => e.outcome === 'not_fixed').length} confirmed not auto-fixed, ${registry.filter((e) => e.outcome === 'reverted').length} reverted, ${registry.filter((e) => e.status === 'agent_failed' || e.outcome === 'agent_failed').length} agent-failed, ${registry.filter((e) => e.status === 'refuted').length} refuted, ${finderFailures.length} finder(s) failed`)
 
+// The first sentence of a skeptic's reason: the report gives a refuted finding
+// one line.
+function firstSentence(text) {
+  const reason = String(text || '')
+  const end = reason.search(/[.!?](\s|$)/)
+  const first = end >= 0 ? reason.slice(0, end + 1) : reason
+  return first.length > 300 ? `${first.slice(0, 300)}…` : first
+}
+
 // Each finding carries only the fields its outcome is reported by: the result
 // lands whole in the launching session, every round of it under merge-ready.
 function reported(e) {
@@ -913,7 +927,7 @@ function reported(e) {
   if (e.status !== 'refuted' && e.outcome !== 'fixed' && e.outcome !== 'covered') f.description = e.finalDescription ?? e.description
   if (e.corrected) f.corrected = true
   if (e.alsoReportedBy.length) f.alsoReportedBy = e.alsoReportedBy
-  if (e.status === 'refuted') Object.assign(f, { refutedBy: e.refutedBy, refuteReason: e.refuteReason })
+  if (e.status === 'refuted') Object.assign(f, { refutedBy: e.refutedBy, refuteReason: firstSentence(e.refuteReason) })
   if (e.failedAt) f.failedAt = e.failedAt
   if (!e.outcome) return f
   f.outcome = e.outcome
@@ -921,8 +935,8 @@ function reported(e) {
   if (e.outcome === 'fixed') {
     Object.assign(f, { commitSha: e.commitSha, files: impl.files })
     if (impl.notes && impl.notes.trim()) f.notes = impl.notes
-    // The merge-ready triage reads an uncommitted fix's hunks; a commit carries its own.
-    if (!e.committed && impl.hunks) f.hunks = impl.hunks
+    // Only merge-ready's triage reads an uncommitted fix's hunks; a commit carries its own.
+    if (input.returnHunks && !e.committed && impl.hunks) f.hunks = impl.hunks
   } else if (e.outcome === 'covered') {
     f.coveredBy = e.coveredBy ?? null
   } else if (e.outcome === 'not_fixed') {
