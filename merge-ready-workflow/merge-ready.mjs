@@ -110,7 +110,7 @@ const LOOP_START = input.loopStart || null
 // The vocabulary the triage judges each fix's hunks in. `production` marks the
 // kinds that change what shipped code does at runtime.
 const CHANGE_KINDS = {
-  logic: { production: true, text: 'a change to what shipped code does: application logic, data handling, queries, API handlers, UI behaviour; a helper local to the file it fixes is part of it' },
+  logic: { production: true, text: 'a change to what shipped code does: application logic, data handling, queries, API handlers, UI behaviour; a helper local to the file it fixes is part of it; also adding, restoring, removing or renaming a translation key, asset or config entry that shipped code references, since what the code resolves at runtime changes' },
   config: { production: true, text: 'configuration the running product reads' },
   robustness: { production: true, text: 'a small guard or fallback with no user-visible effect today' },
   instructions: { production: true, text: 'a prompt, tool description, skill or agent instructions the product loads' },
@@ -120,7 +120,7 @@ const CHANGE_KINDS = {
   format: { production: false, text: 'formatting only' },
   comment: { production: false, text: 'comments and docstrings' },
   docs: { production: false, text: 'docs and agent docs' },
-  copy: { production: false, text: 'user-facing copy, error message text and translations' },
+  copy: { production: false, text: 'rewording user-facing copy, error message text or translations whose keys already exist and are already referenced' },
   'log-text': { production: false, text: 'log message text' },
   test: { production: false, text: 'tests, fixtures and test helpers, added or updated' },
   'ci-build': { production: false, text: 'existing CI or build configuration' },
@@ -140,7 +140,7 @@ const DIMENSIONS_SCHEMA = {
           title: { type: 'string', description: 'One line naming the slice.' },
           focus: { type: 'string', description: 'A paragraph naming the specific things to attack in these files.' },
           files: { type: 'array', items: { type: 'string' }, description: 'Paths exactly as listed in the prompt, or a directory ending in / for every file in scope under it.' },
-          production: { type: 'boolean', description: 'True when any of its files holds code or configuration the running product executes or reads; false only when every one is docs, comments, user-facing copy and translations, tests and fixtures, or CI and build configuration. A doc the product loads as instructions (a prompt, a skill, agent instructions) is production.' },
+          production: { type: 'boolean', description: 'True when any of its files holds code or configuration the running product executes or reads; false only when every one is docs, comments, rewordings of user-facing copy and translations, tests and fixtures, or CI and build configuration. A doc the product loads as instructions (a prompt, a skill, agent instructions) is production, and so is a translation or config file whose keys the diff adds, removes or renames, since shipped code resolves them at runtime.' },
         },
         required: ['key', 'title', 'focus', 'files', 'production'],
       },
@@ -251,7 +251,7 @@ ${READ_ONLY}
 You are the TRIAGE agent of a looping adversarial code review. Round ${round} just fixed the medium, high and critical findings below. For each one, classify its fix by the kinds of change its hunks contain, from this list. The kinds marked production change what shipped code does at runtime; the others do not:
 ${kindList}
 
-A fix carries every kind its hunks contain: one that changed a comment and a query is comment and logic. Read each fix's hunks (from its commit, or pasted below for a fix left uncommitted), list a production kind only when a hunk changes what shipped code does, and quote that hunk in the reason. One verdict per finding id.
+A fix carries every kind its hunks contain: one that changed a comment and a query is comment and logic. Judge a hunk by what it changes at runtime, not by the file type it sits in: when the finding describes a defect a user of the running product sees or hits, and the fix removes it, the fix carries a production kind whatever its hunks look like. Read each fix's hunks (from its commit, or pasted below for a fix left uncommitted), list a production kind only when a hunk changes what shipped code does, and quote that hunk in the reason. One verdict per finding id.
 
 ${blocks}`
 }
