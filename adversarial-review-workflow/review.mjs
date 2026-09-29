@@ -12,6 +12,11 @@ export const meta = {
   ],
 }
 
+// Never resume a dead run with resumeFromRunId: the cache key of each agent
+// call chains every call issued before it, and the finders and skeptics issue
+// theirs in the order earlier calls finish, so a resume misses partway through,
+// re-runs the rest live against a tree that already holds the fixes, and the
+// skeptics refute every finding as already fixed. Relaunch instead.
 const SCOPES = ['uncommitted', 'branch', 'unpushed', 'codebase']
 const SEVERITIES = ['nit', 'low', 'medium', 'high', 'critical']
 
@@ -86,10 +91,9 @@ function scopeText() {
   if (input.scope === 'codebase') {
     return `Review scope: ${SCOPE_LABEL.codebase}, every tracked file plus untracked files. There is no base commit: read files whole with cat/sed.`
   }
-  const untracked = input.untracked.length
-    ? `\nUntracked files are in scope too and have no diff against the base, so read them whole:\n${input.untracked.map((f) => `- ${f}`).join('\n')}`
-    : '\nThere were no untracked files at launch.'
-  return `Review scope: ${SCOPE_LABEL[input.scope]}, i.e. the working tree against base commit ${BASE}. Read a file's hunks with \`git diff ${BASE} -- <path>\`, the pre-change file with \`git show ${BASE}:<path>\`, the file list with \`git diff --stat ${BASE}\`, and the surrounding current code with cat/sed. A path in scope whose diff is empty is untracked: read it whole.${untracked}`
+  // The untracked paths are not listed here: every agent reads this, and the
+  // finders get theirs marked in their own file list.
+  return `Review scope: ${SCOPE_LABEL[input.scope]}, i.e. the working tree against base commit ${BASE}, plus untracked files. Read a file's hunks with \`git diff ${BASE} -- <path>\`, the pre-change file with \`git show ${BASE}:<path>\`, the file list with \`git diff --stat ${BASE}\` and \`git ls-files -o --exclude-standard\`, and the surrounding current code with cat/sed. A path in scope whose diff is empty is untracked: read it whole.`
 }
 
 // The commit messages are never pasted: a branch, or the commits earlier
@@ -121,14 +125,21 @@ const UNPROMPTED_BEHAVIOUR = 'working autonomously, batching calls, summarising 
 const NON_INFERABLE_CONTRACT = 'a format, a limit, a fact about the environment, what the tool accepts or returns'
 const HOLLOW_TEST = "recomputes the implementation's formula from the same constants, or asserts what a stub or hand-written mock returns"
 
-const CONTEXT = `Repository: ${ROOT}.
+// Clustering and the sibling check judge neither severity nor intent, and the
+// implementer works from a settled severity, so each agent gets only the parts
+// it uses.
+const PROJECT = `Repository: ${ROOT}.
 ${input.context.trim()}
-${scopeText()}${INTENT_TEXT}
-Severity scale: critical = data loss or corruption, a security breach, or a crash of the production process; high = wrong behaviour on a path users hit in normal use, a deadlock, hang or resource leak under normal load, a cost or quality regression on every request of an affected configuration (a cache miss, dropped context), or a security or tenancy gap; medium = wrong behaviour on an edge path, a real leak or race that is hard to hit, a convention violation the project's agent docs state explicitly, or a false statement in docs or comments a maintainer would act on; low = a demonstrably false statement shipped to users (UI copy, translations, docs, error messages), a misleading comment, ${DEAD_CODE} or ${STALE_TERMINOLOGY}, or a small robustness issue with no user-visible effect today; nit = a cosmetic flaw that changes no behaviour and misleads no one: a typo or grammar slip (in copy, docs, comments, log text or an identifier) or a name that breaks the pattern of the names around it.`
+${scopeText()}`
+const PROJECT_INTENT = `${PROJECT}${INTENT_TEXT}`
+const SEVERITY_SCALE = `Severity scale: critical = data loss or corruption, a security breach, or a crash of the production process; high = wrong behaviour on a path users hit in normal use, a deadlock, hang or resource leak under normal load, a cost or quality regression on every request of an affected configuration (a cache miss, dropped context), or a security or tenancy gap; medium = wrong behaviour on an edge path, a real leak or race that is hard to hit, a convention violation the project's agent docs state explicitly, or a false statement in docs or comments a maintainer would act on; low = a demonstrably false statement shipped to users (UI copy, translations, docs, error messages), a misleading comment, ${DEAD_CODE} or ${STALE_TERMINOLOGY}, or a small robustness issue with no user-visible effect today; nit = a cosmetic flaw that changes no behaviour and misleads no one: a typo or grammar slip (in copy, docs, comments, log text or an identifier) or a name that breaks the pattern of the names around it.`
+const CONTEXT = `${PROJECT_INTENT}\n${SEVERITY_SCALE}`
 
 const READ_ONLY = `You are READ-ONLY with respect to the repository: do not edit, create or delete files under ${ROOT}, and run no git command that changes state (no checkout, restore, stash, commit, reset, clean). Scratch files go in /tmp. You may run existing tests and small scripts from /tmp.`
 
-const DIMENSION_LIST = DIMENSIONS.map((d) => `- ${d.key}: ${d.title}. Files: ${d.files.join(', ')}`).join('\n')
+// Keys and titles only: every finder reads it, and the files of the others add
+// nothing to knowing which angle is whose.
+const DIMENSION_LIST = DIMENSIONS.map((d) => `- ${d.key}: ${d.title}`).join('\n')
 
 // One vocabulary for what a fix is made of. The implementer reports its fix in
 // these kinds, and the merge-ready triage judges a fix in the same ones, reading
@@ -255,7 +266,7 @@ const IMPL_SCHEMA = {
     excludedKind: { type: ['string', 'null'], enum: [...EXCLUSION_KEYS, null], description: 'For not_applied: the key of the excluded kind that applies; null for every other outcome.' },
     files: { type: 'array', items: { type: 'string' }, description: 'Repo-relative paths you changed or created (empty unless outcome is applied).' },
     kinds: { type: 'array', items: { type: 'string', enum: CHANGE_KEYS }, description: 'Every kind of change in your fix, by key from the list in the prompt; empty unless outcome is applied.' },
-    hunks: { type: 'string', description: 'The `git diff` (or `git show` after committing) of your change; empty unless outcome is applied.' },
+    hunks: { type: 'string', description: 'The `git diff` of your change when you left it uncommitted; empty when you committed it (the commit carries it) and unless outcome is applied.' },
     checks: { type: 'array', items: { type: 'object', properties: { command: { type: 'string' }, result: { type: 'string' } }, required: ['command', 'result'] } },
     committed: { type: 'boolean' },
     commitSha: { type: ['string', 'null'] },
@@ -316,8 +327,12 @@ Rules:
 - Give the exact file and line in the current working tree. An empty findings list is a valid answer.`
 }
 
+// Every registered finding is listed on every intake, so only the ones in the
+// new finding's file carry their description: the list grows with the square
+// of the finding count, and a duplicate elsewhere shows in its title and
+// location.
 function dedupPrompt(f, dim, candidates) {
-  const list = candidates.map((c) => `- id ${c.id}: "${c.title}" at ${c.file}:${c.line}\n  ${c.description}`).join('\n')
+  const list = candidates.map((c) => `- id ${c.id}: "${c.title}" at ${c.file}:${c.line}${c.file === f.file ? `\n  ${c.description}` : ''}`).join('\n')
   return `You are the DEDUP check of a code review. A new finding just arrived from finder "${dim}". Compare it with every registered finding below and say whether it is the same defect as one of them.
 Definition: two findings are the same defect when one change at one location fixes both. Findings that are merely related, in the same file, or share a theme are not the same defect. When in doubt, answer null (not a duplicate).
 
@@ -327,7 +342,7 @@ Location: ${f.file}:${f.line}
 Description: ${f.description}
 Suggested fix: ${f.suggestedFix}
 
-Registered findings:
+Registered findings (descriptions shown for the ones in the same file; read the code at a location when a title alone leaves it open):
 ${list}
 
 Answer with the id of the registered finding it duplicates, or null.`
@@ -385,7 +400,7 @@ A wrong detail is only a kill ground when the failure mechanism collapses with i
 }
 
 function clusterPrompt(confirmed) {
-  return `${CONTEXT}
+  return `${PROJECT}
 
 ${READ_ONLY}
 
@@ -431,7 +446,7 @@ function implementerPrompt(e, siblings) {
   const sibText = siblings.length
     ? `\nThis finding leads a cluster; the single change that fixes it should also fix these siblings (the clustering attached their files to your allowed set):\n${siblings.map((s) => findingText(s)).join('\n\n')}\n`
     : ''
-  return `${CONTEXT}
+  return `${PROJECT_INTENT}
 
 You are the IMPLEMENTER for one confirmed finding. You may edit files under ${ROOT}. Nobody reviews your change after you: you are the last line. Judge your own diff the way the maintainer reviewing the merge request would; they send back anything bigger than the finding.
 
@@ -451,14 +466,14 @@ Otherwise: make the change. ${checksText()}
 
 Commit rule: when none of the files you changed or created is protected, commit the fix yourself: \`git add <exactly your files>\`, then \`git commit\` with a message in the project's commit convention (from the context above; default \`type(scope): subject\`), with no attribution lines or trailers; report committed=true and the sha. When any file you changed is protected, leave the whole fix uncommitted and report committed=false: never commit a whole file to get around the overlap.
 
-Report outcome=applied with exactly the files and hunks you changed (paste the diff), the kinds of change by key, every check command with its result, and the commit state. Finish with \`git status --porcelain\` and make sure your report matches it: nothing of yours may remain in the tree after not_applied, covered or reverted.`
+Report outcome=applied with exactly the files you changed, your own hunks pasted only when the fix stays uncommitted (a protected file's diff also holds the user's work), the kinds of change by key, every check command with its result, and the commit state. Finish with \`git status --porcelain\` and make sure your report matches it: nothing of yours may remain in the tree after not_applied, covered or reverted.`
 }
 
 function siblingPrompt(s, lead, fix) {
   const where = fix.sha
     ? `commit ${fix.sha}; inspect it with \`git show ${fix.sha}\``
     : `uncommitted in the working tree; inspect it with \`git diff -- ${fix.files.join(' ')}\``
-  return `${CONTEXT}
+  return `${PROJECT}
 
 ${READ_ONLY}
 

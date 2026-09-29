@@ -1,0 +1,17 @@
+# Reporting a review.mjs result
+
+Each finding carries `status` (`confirmed`, `refuted`, `agent_failed`) and `outcome` (`fixed`, `covered`, `not_fixed`, `reverted`, `agent_failed`, or null when never implemented), plus the fields named below. `excludedKinds` maps each exclusion key to its description.
+
+Report every finding in six categories, ordered by severity within each:
+- fixed: whether committed (with `commitSha`) or left uncommitted in the working tree, naming the `files`, plus the implementer's `notes` on what a fuller fix would need;
+- covered: by its cluster lead's fix, naming it (`coveredBy`), or already closed in the tree when an implementer reached it (`coveredBy` null);
+- confirmed but not auto-fixed, saying which excluded kind it was (`excludedKind`), in the words of `excludedKinds`, with the implementer's `plan`;
+- fix attempted but reverted, with the check that could not pass (`reason`) and the `plan`;
+- never attempted because an agent failed, naming the agent (`failedAt`);
+- refuted, with the skeptic (`refutedBy`) and its `refuteReason`.
+
+Number the findings continuously across the whole report so each can be quoted by its number. Say when a finding's description was `corrected` by the technical skeptic. When `implementerModel` is not null, say which model applied the fixes. A duplicate the dedup attached at intake appears in its primary's `alsoReportedBy`; report it under its primary as "also reported by" with the finder that reported it, without a number of its own. Then:
+- `finderFailures` non-empty: state prominently that those dimensions were never reviewed, naming them, and make no claim that the scope was covered.
+- `checksConfigured` false: state that no check command was found, so every fix was verified only by reading, and the user should run the project's checks before relying on the tree.
+- `uncommittedFixFiles` non-empty: list them and say those fixes sit in the working tree next to the user's uncommitted work.
+- `possiblyDirty` non-empty: state prominently that an implementer died and the cleanup could not restore these paths because they were protected, so they may hold partial hunks the user must inspect.

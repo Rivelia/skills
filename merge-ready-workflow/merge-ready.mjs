@@ -10,6 +10,10 @@ export const meta = {
   ],
 }
 
+// Never resume a dead run with resumeFromRunId: each round's review.mjs call
+// misses the cache partway through (see there) and re-runs live against a tree
+// that already holds the fixes, so the loop reports `converged` on a round
+// that fixed nothing. Relaunch instead.
 const SCOPES = ['uncommitted', 'branch', 'unpushed', 'codebase']
 // Fixes that can justify another round, two ways. A medium-or-higher fix whose
 // hunks change what shipped code does gives fresh finders new behaviour to
@@ -211,7 +215,7 @@ function triagePrompt(round, candidates, findings, changeKinds) {
     const fixer = c.outcome === 'covered' && c.coveredBy != null ? findings.find((f) => f.id === c.coveredBy) : null
     const fix = fixer || c
     const via = fixer ? `\nFixed by the change for finding #${fixer.id} "${fixer.title}", which covers it.` : ''
-    const hunks = fix.hunks && fix.hunks.trim() ? `\nHunks:\n${fix.hunks.trim()}` : '\nHunks: not reported; read the fix from git.'
+    const hunks = fix.hunks && fix.hunks.trim() ? `\nHunks:\n${fix.hunks.trim()}` : ''
     return `Finding #${c.id} [${c.severity}] ${c.title}\nLocation: ${c.file}:${c.line}\nDescription: ${c.description}${via}\nFix: ${fixLocation(fix)}\nKinds reported by the implementer: ${(fix.kinds || []).join(', ') || '(none)'}${hunks}`
   }).join('\n\n')
   return `${CONTEXT}
@@ -221,7 +225,7 @@ ${READ_ONLY}
 You are the TRIAGE agent of a looping adversarial code review. Round ${round} just fixed the medium, high and critical findings below. For each one, classify its fix by the kinds of change its hunks contain, from this list. The kinds marked production change what shipped code does at runtime; the others do not:
 ${kindList}
 
-A fix carries every kind its hunks contain: one that changed a comment and a query is comment and logic. The implementer's own kinds are shown for reference; judge from the hunks. Read each fix's hunks (pasted below when the implementer reported them, otherwise from git as indicated), list a production kind only when a hunk changes what shipped code does, and quote that hunk in the reason. One verdict per finding id.
+A fix carries every kind its hunks contain: one that changed a comment and a query is comment and logic. The implementer's own kinds are shown for reference; judge from the hunks. Read each fix's hunks (from its commit, or pasted below for a fix left uncommitted), list a production kind only when a hunk changes what shipped code does, and quote that hunk in the reason. One verdict per finding id.
 
 ${blocks}`
 }
@@ -491,6 +495,8 @@ const allUncommittedFixFiles = new Set()
 const allPossiblyDirty = new Set()
 let stopReason = null
 let stopDetail = null
+let changeKindsTable = null
+let excludedKindsTable = null
 
 log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_ROUNDS} review round(s), scout and implementers on ${MODEL || 'the session model'}, simplify afterwards`)
 
@@ -535,9 +541,8 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
 
   const entry = {
     round,
-    dimensions: dimensions.map(({ key, title, files }) => ({ key, title, files })),
+    dimensions: dimensions.map(({ key, title, files }) => ({ key, title, fileCount: files.length })),
     unassignedFiles: missing,
-    dirtyAtLaunch,
     review,
     error,
     triage: null,
@@ -604,6 +609,17 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     }
   }
   entry.triage = triage
+  // The result lands in the launching session whole, every round of it, so
+  // what the report never reads leaves once triage has read the hunks: the
+  // hunks and check logs, and the kind tables, which every round repeats.
+  if (!changeKindsTable) changeKindsTable = changeKinds
+  if (!excludedKindsTable && review.excludedKinds) excludedKindsTable = review.excludedKinds
+  entry.review = {
+    ...review,
+    changeKinds: undefined,
+    excludedKinds: undefined,
+    findings: findings.map(({ hunks, checks, ...f }) => f),
+  }
 
   const reasons = []
   if (triage.productionIds.length) {
@@ -686,6 +702,8 @@ return {
   checksConfigured: CHECKS !== null,
   checkCmdConfigured: CHECK_CMD !== null,
   maxRounds: MAX_ROUNDS,
+  changeKinds: changeKindsTable,
+  excludedKinds: excludedKindsTable,
   stopReason,
   stopDetail,
   rounds,

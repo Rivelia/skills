@@ -12,6 +12,11 @@ export const meta = {
   ],
 }
 
+// Never resume a dead run with resumeFromRunId: the cache key of each agent
+// call chains every call issued before it, and the judges and appliers issue
+// theirs in the order the finders finish, so a resume misses partway through
+// and re-runs the rest live against a tree that already holds the edits.
+// Relaunch instead.
 const FOCUS = {
   uncommitted: 'Focus on the uncommitted changes.',
   branch: 'Focus on the full working-tree diff against the base branch.',
@@ -544,7 +549,7 @@ function judgePrompt(findings, isSweep) {
 You are the independent gatekeeper in an automated code-simplification loop. A finder agent proposed the simplifications below. For each one, read the current code it targets and decide whether applying it would genuinely improve the codebase.
 
 Proposals (JSON, judge each by its array index, starting at 0):
-${JSON.stringify(findings, null, 2)}
+${JSON.stringify(findings)}
 
 Approve a proposal only when it clearly preserves behavior and leaves the code easier to read or maintain by a margin that justifies touching settled code. Reject:
 - cosmetic and preference-level changes: renaming an already-clear identifier, reshuffling already-readable code, style churn;
@@ -564,7 +569,7 @@ function applyPrompt(approved) {
 Implement the following code-simplification findings exactly as described. Each was proposed by a finder agent and validated by an independent judge; your job is faithful application, not invention. Make no improvements beyond these findings.
 
 Findings (JSON):
-${JSON.stringify(approved, null, 2)}
+${JSON.stringify(approved)}
 
 Preserve behavior exactly. Create a new file only when a finding calls for it. If a finding proves unsafe or impossible as described once you see the code, skip it and record it in \`failed\` with a reason instead of improvising an alternative.
 
