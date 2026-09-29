@@ -29,11 +29,7 @@ One Workflow runs adversarial review rounds, each with freshly scouted finder di
    - `checks`, for the review implementers: typecheck, lint and how to run the tests that cover a given file, as commands the implementer can run on the files it touched, never a watch mode. Confirm each script or target exists; if nothing trustworthy is found, omit `checks` and the implementers verify by reading.
    - `checkCmd`, for the simplify phase: a single non-interactive command, preferring typecheck plus tests joined with `&&`, never a watch mode. Run it once via Bash from the project root: failing checks are fine (the simplify workflow baselines them), but if the command itself cannot run (unknown script, missing tooling), discard it. If nothing trustworthy is found, omit `checkCmd`.
 
-   Set `pruneExts` to the comment-carrying source extensions of this repo, e.g. `[".ts", ".js", ".svelte"]`, the set for the repo rather than the extensions that happen to appear in the diff. Optionally set `excludePattern`, an extended regex with no single quote, when the default would let a build output directory, generated code or a vendored tree of this repo into the simplify phase; it filters the simplify file list and both prune candidate lists, and replaces the default rather than adding to it. The default:
-
-   ```
-   (^|/)(node_modules|vendor|third_party|dist|build|target|generated)/|\.min\.|(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|go\.sum)$|\.(json|jsonl|csv|tsv|md|mdx|lock|snap|svg|png|jpe?g|gif|ico|webp|pdf|woff2?|ttf|otf|eot|zip|gz|wasm|so|dylib|dll|exe|bin)$
-   ```
+   Set `pruneExts` to the comment-carrying source extensions of this repo, e.g. `[".ts", ".js", ".svelte"]`, the set for the repo rather than the extensions that happen to appear in the diff. Optionally set `excludePattern`, an extended regex with no single quote, when the default would let a build output directory, generated code or a vendored tree of this repo into the simplify phase; it filters the simplify file list and both prune candidate lists, and replaces the default rather than adding to it. The default excludes `node_modules`, `vendor`, `third_party`, `dist`, `build`, `target` and `generated` directories, minified files, lockfiles, and data, doc, image, font, archive and binary files (`json`, `md`, `svg`, `png`, `pdf`, `woff`, `zip`, `wasm`, `so` and the like). To override it, start from the `DEFAULT_EXCLUDE` constant in the `simplify.mjs` located in step 2.
 
 4. **Launch the workflow.** Substitute the resolved paths:
 

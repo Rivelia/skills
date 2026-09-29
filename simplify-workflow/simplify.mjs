@@ -6,7 +6,7 @@ export const meta = {
     { title: 'Find', detail: 'read-only agents propose simplifications per batch', model: 'opus' },
     { title: 'Judge', detail: 'independent gatekeepers strike proposals that are not genuine improvements', model: 'opus' },
     { title: 'Apply', detail: 'implement the approved findings per batch' },
-    { title: 'Hash', detail: 'deterministic tree hash after each round', model: 'sonnet' },
+    { title: 'Hash', detail: 'deterministic tree hash after each round an applier ran in, and each prune pass', model: 'sonnet' },
     { title: 'Discover', detail: 'list untracked files the appliers did not declare', model: 'sonnet' },
     { title: 'Verify', detail: 'project check command: baseline on sonnet, then an opus fix-up agent after each editing phase', model: 'opus' },
     { title: 'Prune', detail: 'audit and delete non-useful comments per file batch', model: 'opus' },
@@ -75,8 +75,8 @@ if (input.applyModel !== undefined && (typeof input.applyModel !== 'string' || !
 // baseline hash are read here, so a scope of thousands of files never passes
 // through its context.
 
-// Quoted in SKILL.md step 3 of this skill and of merge-ready, so the launching
-// session never opens this script to learn it.
+// Described in SKILL.md step 3 of this skill and of merge-ready; the launching
+// session reads it here only to override it.
 const DEFAULT_EXCLUDE = '(^|/)(node_modules|vendor|third_party|dist|build|target|generated)/|\\.min\\.|(^|/)(package-lock\\.json|yarn\\.lock|pnpm-lock\\.yaml|Cargo\\.lock|poetry\\.lock|go\\.sum)$|\\.(json|jsonl|csv|tsv|md|mdx|lock|snap|svg|png|jpe?g|gif|ico|webp|pdf|woff2?|ttf|otf|eot|zip|gz|wasm|so|dylib|dll|exe|bin)$'
 const SCOPE = input.scope
 const ROOT = input.root
@@ -407,7 +407,7 @@ const APPLY_SCHEMA = {
         type: 'object',
         properties: {
           group: { type: 'string', enum: GROUPS },
-          description: { type: 'string' },
+          description: { type: 'string', description: 'One sentence naming what changed.' },
           files: { type: 'array', items: { type: 'string' } },
         },
         required: ['group', 'description', 'files'],
@@ -815,7 +815,7 @@ Preserve behavior exactly. Create a new file only when a finding calls for it. I
 
 Other agents are editing other parts of this project concurrently, so project-wide commands (typecheck, build, lint, test suite) would see a half-edited tree, so do not run them. Verify your edits by reading the code.
 
-Report every change you actually made in \`applied\`, each classified as one of: ${GROUPS.join(', ')}, with the files it touched; every file you created in \`createdFiles\`; and every finding you skipped in \`failed\`. Every path must be relative to the project root, with no leading './' and never absolute. For files you edited, use exactly the paths as they appear in the findings above.`
+Report every change you actually made in \`applied\`, each in one sentence and classified as one of: ${GROUPS.join(', ')}, with the files it touched; every file you created in \`createdFiles\`; and every finding you skipped in \`failed\`. Every path must be relative to the project root, with no leading './' and never absolute. For files you edited, use exactly the paths as they appear in the findings above.`
 }
 
 function assignNewFile(path) {
@@ -870,6 +870,9 @@ while (true) {
     log(`round ${iterations}: ${targets.length}/${batches.length} batches active`)
   }
 
+  // Finders and judges are read-only, so a round that dispatched no applier
+  // left the tree where the last hash found it and needs no hash agent.
+  let roundDispatched = false
   const results = await pipeline(
     targets,
     batch =>
@@ -913,6 +916,7 @@ while (true) {
       // abandoned batch's account of its own files may read that silence as an
       // untouched tree.
       treeEdited = true
+      roundDispatched = true
       batch.applierDispatched = true
       for (const file of approved.flatMap(f => f.files ?? [])) possiblyEditedFiles.add(file)
       return agent(applyPrompt(approved), {
@@ -1015,7 +1019,7 @@ while (true) {
   for (const f of newFiles) assignNewFile(f)
   filesCreatedDuringRun.push(...newFiles)
 
-  const treeHash = await runHash(HASH_CMD, `hash:tree@${iterations}`)
+  const treeHash = roundDispatched ? await runHash(HASH_CMD, `hash:tree@${iterations}`) : lastTreeHash
   if (!treeHash) {
     stopReason = 'hash-unavailable'
     log(`round ${iterations}: hash agent could not return a hash, so convergence cannot be confirmed; stopping and reporting the work done so far`)
@@ -1373,11 +1377,12 @@ const summary = {}
 for (const group of GROUPS) summary[group] = []
 for (const change of allChanges) {
   const group = GROUPS.includes(change.group) ? change.group : 'Code simplifications'
-  summary[group].push({ description: change.description, files: change.files })
+  summary[group].push({ description: firstSentence(change.description), files: change.files })
 }
 
 // A long run can reject hundreds of proposals; the report relays the first
-// few, each by its first sentence, and past the cap gives only the count.
+// few, each by its first sentence, and past the cap gives only the count. An
+// applied change is relayed by its first sentence too.
 const REJECTED_SHOWN = 10
 
 function firstSentence(text) {

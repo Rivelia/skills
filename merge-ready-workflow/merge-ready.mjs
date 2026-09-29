@@ -130,7 +130,7 @@ const DIMENSIONS_SCHEMA = {
           key: { type: 'string', description: 'Short slug, unique among the dimensions.' },
           title: { type: 'string', description: 'One line naming the slice.' },
           focus: { type: 'string', description: 'A paragraph naming the specific things to attack in these files.' },
-          files: { type: 'array', items: { type: 'string' }, description: 'Paths exactly as listed in the prompt.' },
+          files: { type: 'array', items: { type: 'string' }, description: 'Paths exactly as listed in the prompt, or a directory ending in / for every file in scope under it.' },
         },
         required: ['key', 'title', 'focus', 'files'],
       },
@@ -177,11 +177,33 @@ function scoutIntentText() {
   return `\nAuthor's intent for this diff:\n${parts.join('\n')}\nThe intent is the baseline the finders test the diff against: a removal it states is a decision they check for breakage, not a loss to audit. Cut the dimensions around what the diff introduced or changed and what that could break.\n`
 }
 
+// Past this many paths the scout reads file counts per directory instead of
+// the paths, and cuts the dimensions by directory.
+const SCOUT_PATHS_MAX = 200
+
+// The files in scope per directory, two levels deep; a file at the root is
+// listed by itself.
+function directoryCounts(inScope) {
+  const counts = new Map()
+  for (const f of inScope) {
+    const parts = f.split('/')
+    const key = parts.length > 2 ? `${parts[0]}/${parts[1]}/` : parts.length > 1 ? `${parts[0]}/` : f
+    counts.set(key, (counts.get(key) || 0) + 1)
+  }
+  return [...counts].map(([k, n]) => (k.endsWith('/') ? `- ${k} (${n} file${n === 1 ? '' : 's'})` : `- ${k}`)).join('\n')
+}
+
 // The scout is told nothing about earlier rounds: no round number, no earlier
 // split, no list of what the fixes touched. Each round's cut is designed from
 // the scope alone, the way a cleared conversation would design it.
 function scoutPrompt(inScope, untracked) {
-  const list = inScope.map((f) => `- ${f}${untracked.has(f) ? ' (untracked: no diff against the base, read whole)' : ''}`).join('\n')
+  const byDir = inScope.length > SCOUT_PATHS_MAX
+  const list = byDir
+    ? directoryCounts(inScope)
+    : inScope.map((f) => `- ${f}${untracked.has(f) ? ' (untracked: no diff against the base, read whole)' : ''}`).join('\n')
+  const listing = SCOPE === 'codebase'
+    ? '`git ls-files -co --exclude-standard -- <dir>`'
+    : `\`git diff --name-only ${BASE} -- <dir>\` plus \`git ls-files -o --exclude-standard -- <dir>\``
   const sizes = SCOPE === 'codebase'
     ? 'See sizes with `wc -l` on the paths.'
     : `See sizes with \`git diff --stat ${BASE}\`.`
@@ -191,11 +213,11 @@ ${READ_ONLY}
 ${scoutIntentText()}
 You are the SCOUT of an adversarial code review. Design the finder dimensions from the SHAPE of the scope, not its content: which files are in it and how large their change is, which subsystems and layers they belong to, and what you know of the repository (read its agent docs and directory layout as needed; the finders read the hunks themselves).
 
-Files in scope (${inScope.length}):
+${byDir ? `Files in scope (${inScope.length}), counted per directory; list a directory's files with ${listing} when you need to split it:` : `Files in scope (${inScope.length}):`}
 ${list}
 ${sizes}
 
-One finder runs per dimension. A dimension is a slice a single reviewer can hold in context and attack from one angle: a subsystem, a layer, or a cross-cutting concern such as authorization, i18n and docs, or tests and CI. Every file listed above belongs to at least one dimension; a file may appear in several when two angles both need it. \`focus\` is a paragraph naming the specific things to attack in those files: the mechanisms the diff introduced, the invariants it could break, the callers that depend on it. Past runs used five to nine dimensions for branches of forty to a hundred changed files; a small diff may need two. Use the paths exactly as listed above.`
+One finder runs per dimension. A dimension is a slice a single reviewer can hold in context and attack from one angle: a subsystem, a layer, or a cross-cutting concern such as authorization, i18n and docs, or tests and CI. Every file in scope belongs to at least one dimension; a file may appear in several when two angles both need it. A \`files\` entry ending in / stands for every file in scope under that directory: use one wherever a dimension takes a whole directory rather than spelling out its paths. \`focus\` is a paragraph naming the specific things to attack in those files: the mechanisms the diff introduced, the invariants it could break, the callers that depend on it. Past runs used five to nine dimensions for branches of forty to a hundred changed files; a small diff may need two. Use the paths and directories exactly as the scope names them.`
 }
 
 function fixLocation(f) {
@@ -435,14 +457,16 @@ async function runChild(scriptPath, childArgs, what) {
 }
 
 // The scout's split is advice; coverage is not. Files it left out get a
-// catch-all finder rather than silently leaving the round's scope.
+// catch-all finder rather than silently leaving the round's scope. A directory
+// entry stays one entry for the finder, and counts for every file under it.
 function normalizeDimensions(raw, inScope) {
   const scope = new Set(inScope)
+  const expand = (entry) => (entry.endsWith('/') ? inScope.filter((f) => f.startsWith(entry)) : scope.has(entry) ? [entry] : [])
   const keys = new Set()
   const dimensions = []
   for (const d of raw || []) {
     if (!d || !d.title || !d.focus || !Array.isArray(d.files)) continue
-    const files = [...new Set(d.files.filter((f) => scope.has(f)))]
+    const files = [...new Set(d.files.filter((f) => typeof f === 'string' && expand(f).length))]
     if (files.length === 0) continue
     let key = String(d.key || '').trim().replace(/\s+/g, '-') || `dim-${dimensions.length + 1}`
     const stem = key
@@ -450,7 +474,7 @@ function normalizeDimensions(raw, inScope) {
     keys.add(key)
     dimensions.push({ key, title: d.title, focus: d.focus, files })
   }
-  const covered = new Set(dimensions.flatMap((d) => d.files))
+  const covered = new Set(dimensions.flatMap((d) => d.files.flatMap(expand)))
   const missing = inScope.filter((f) => !covered.has(f))
   if (missing.length) {
     let key = 'unassigned'
@@ -513,7 +537,7 @@ for (let round = 1; launch && round <= MAX_ROUNDS; round++) {
     untracked,
     dimensions,
     context: input.context,
-    returnHunks: true,
+    loopFields: true,
   }
   if (BASE) reviewArgs.base = BASE
   if (CHECKS) reviewArgs.checks = CHECKS

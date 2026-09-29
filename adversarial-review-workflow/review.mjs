@@ -37,7 +37,7 @@ if ((input.dirtyAtLaunch === undefined) !== (input.untracked === undefined)
   throw new Error('args.dirtyAtLaunch and args.untracked: pass both as string[] or omit both to have the workflow list them')
 }
 if (!Array.isArray(input.dimensions) || input.dimensions.length === 0) {
-  throw new Error('args.dimensions: non-empty [{key, title, focus, files: string[]}] is required')
+  throw new Error('args.dimensions: non-empty [{key, title, focus, files: string[]}] is required; a files entry ending in / stands for every file in scope under that directory')
 }
 for (const d of input.dimensions) {
   if (!d || !d.key || !d.title || !d.focus || !Array.isArray(d.files) || d.files.length === 0) {
@@ -47,8 +47,8 @@ for (const d of input.dimensions) {
 if (typeof input.context !== 'string' || !input.context.trim()) {
   throw new Error('args.context: a string describing the project (stack, agent docs to quote, commit convention) is required')
 }
-if (input.returnHunks !== undefined && typeof input.returnHunks !== 'boolean') {
-  throw new Error('args.returnHunks: true to return an uncommitted fix\'s hunks (merge-ready\'s triage reads them); omit it otherwise')
+if (input.loopFields !== undefined && typeof input.loopFields !== 'boolean') {
+  throw new Error('args.loopFields: true to return the fields merge-ready\'s loop reads (each finding\'s finder, an uncommitted fix\'s hunks); omit it otherwise')
 }
 if (input.implementerModel !== undefined && (typeof input.implementerModel !== 'string' || !input.implementerModel.trim())) {
   throw new Error('args.implementerModel: a model name (e.g. opus, sonnet, haiku) when given; omit it to run the implementers on the session model')
@@ -63,6 +63,9 @@ if (input.authorEnd !== undefined && (typeof input.authorEnd !== 'string' || !/^
 const ROOT = input.root
 const BASE = input.base || null
 const DIMENSIONS = input.dimensions
+// Only merge-ready reads a finding's finder and an uncommitted fix's hunks; a
+// standalone run neither returns them nor has the implementers paste the hunks.
+const LOOP_FIELDS = input.loopFields === true
 const CHECKS = typeof input.checks === 'string' && input.checks.trim() ? input.checks.trim() : null
 // The author's intent: a note, verbatim, and the commits up to authorEnd. A
 // removal it states is a decision the finders test for breakage, not a loss to
@@ -254,16 +257,16 @@ const IMPL_SCHEMA = {
   type: 'object',
   properties: {
     outcome: { type: 'string', enum: ['applied', 'covered', 'not_applied', 'reverted'], description: 'applied: a fix is in the tree (committed or not). covered: the defect can no longer occur in the current tree, nothing changed. not_applied: an excluded kind, nothing changed. reverted: you applied a fix, a check could not pass without going beyond the finding, and you undid your own hunks.' },
-    plan: { type: 'string', description: 'The smallest fix you identified, in enough detail for a maintainer to apply it by hand.' },
+    plan: { type: 'string', description: 'For not_applied or reverted: the smallest fix you identified, in enough detail for a maintainer to apply it by hand. Empty when outcome is applied or covered.' },
     reason: { type: 'string', description: 'Why you did or did not apply it: applied / excluded kind (which, and what in the fix triggers it) / covered / which check could not pass.' },
     excludedKind: { type: ['string', 'null'], enum: [...EXCLUSION_KEYS, null], description: 'For not_applied: the key of the excluded kind that applies; null for every other outcome.' },
     files: { type: 'array', items: { type: 'string' }, description: 'Repo-relative paths you changed or created (empty unless outcome is applied).' },
-    hunks: { type: 'string', description: 'The `git diff` of your change when you left it uncommitted; empty when you committed it (the commit carries it) and unless outcome is applied.' },
+    ...(LOOP_FIELDS ? { hunks: { type: 'string', description: 'The `git diff` of your change when you left it uncommitted; empty when you committed it (the commit carries it) and unless outcome is applied.' } } : {}),
     committed: { type: 'boolean' },
     commitSha: { type: ['string', 'null'] },
     notes: { type: 'string', description: 'Anything beyond the finding that a more complete fix would need; empty when nothing.' },
   },
-  required: ['outcome', 'plan', 'reason', 'excludedKind', 'files', 'hunks', 'committed', 'commitSha', 'notes'],
+  required: ['outcome', 'plan', 'reason', 'excludedKind', 'files', ...(LOOP_FIELDS ? ['hunks'] : []), 'committed', 'commitSha', 'notes'],
 }
 
 const SIBLING_SCHEMA = {
@@ -287,8 +290,13 @@ const CLEANUP_SCHEMA = {
 
 // ---------- prompts ----------
 
+// A files entry ending in / stands for every file in scope under it, so a
+// codebase-wide cut never spells out thousands of paths.
 function finderPrompt(d) {
-  const own = d.files.map((f) => `- ${f}${untrackedInScope.has(f) ? ' (untracked: read whole)' : ''}`).join('\n')
+  const own = d.files.map((f) => `- ${f}${f.endsWith('/') ? ' (every file in scope under it)' : untrackedInScope.has(f) ? ' (untracked: read whole)' : ''}`).join('\n')
+  const listDir = input.scope === 'codebase'
+    ? '`git ls-files -co --exclude-standard -- <dir>`'
+    : `\`git diff --name-only ${BASE} -- <dir>\` plus \`git ls-files -o --exclude-standard -- <dir>\``
   const preExisting = input.scope === 'codebase'
     ? 'There is no base, so every defect in the files counts, whatever its age.'
     : `Only defects the diff introduced or worsened. Pre-existing conditions the diff did not touch are out of scope unless the diff makes them worse. But ${INCOMPLETE_FIX}.`
@@ -299,7 +307,7 @@ ${READ_ONLY}
 You are the specialized FINDER for the review dimension "${d.key}: ${d.title}".
 Your focus: ${d.focus}
 Files you own:
-${own}
+${own}${d.files.some((f) => f.endsWith('/')) ? `\nList the files under a directory entry with ${listDir}.` : ''}
 
 All dimensions in this review (other finders own the others; stay on yours, but report a defect you can only see from your files even when its root lies in a file another dimension owns, and say so):
 ${DIMENSION_LIST}
@@ -447,7 +455,7 @@ Otherwise: make the change. ${checksText()}
 
 Commit rule: when none of the files you changed or created is protected, commit the fix yourself: \`git add <exactly your files>\`, then \`git commit\` with a message in the project's commit convention (from the context above; default \`type(scope): subject\`), with no attribution lines or trailers; report committed=true and the sha. When any file you changed is protected, leave the whole fix uncommitted and report committed=false: never commit a whole file to get around the overlap.
 
-Report outcome=applied with exactly the files you changed, your own hunks pasted only when the fix stays uncommitted (a protected file's diff also holds the user's work), and the commit state. Finish with \`git status --porcelain\` and make sure your report matches it: nothing of yours may remain in the tree after not_applied, covered or reverted.`
+Report outcome=applied with exactly the files you changed${LOOP_FIELDS ? ", your own hunks pasted only when the fix stays uncommitted (a protected file's diff also holds the user's work)" : ''}, and the commit state. Finish with \`git status --porcelain\` and make sure your report matches it: nothing of yours may remain in the tree after not_applied, covered or reverted.`
 }
 
 function siblingPrompt(s, lead, fix) {
@@ -915,7 +923,6 @@ function firstSentence(text) {
 function reported(e) {
   const f = {
     id: e.id,
-    dimension: e.dimension,
     title: e.finalTitle ?? e.title,
     file: e.file,
     line: e.line,
@@ -925,6 +932,7 @@ function reported(e) {
   // A refuted finding is reported by its title and the skeptic's reason, a
   // fixed or covered one by its title and the fix.
   if (e.status !== 'refuted' && e.outcome !== 'fixed' && e.outcome !== 'covered') f.description = e.finalDescription ?? e.description
+  if (LOOP_FIELDS) f.dimension = e.dimension
   if (e.corrected) f.corrected = true
   if (e.alsoReportedBy.length) f.alsoReportedBy = e.alsoReportedBy
   if (e.status === 'refuted') Object.assign(f, { refutedBy: e.refutedBy, refuteReason: firstSentence(e.refuteReason) })
@@ -935,8 +943,8 @@ function reported(e) {
   if (e.outcome === 'fixed') {
     Object.assign(f, { commitSha: e.commitSha, files: impl.files })
     if (impl.notes && impl.notes.trim()) f.notes = impl.notes
-    // Only merge-ready's triage reads an uncommitted fix's hunks; a commit carries its own.
-    if (input.returnHunks && !e.committed && impl.hunks) f.hunks = impl.hunks
+    // A commit carries its own hunks.
+    if (LOOP_FIELDS && !e.committed && impl.hunks) f.hunks = impl.hunks
   } else if (e.outcome === 'covered') {
     f.coveredBy = e.coveredBy ?? null
   } else if (e.outcome === 'not_fixed') {
