@@ -2,6 +2,7 @@ export const meta = {
   name: 'merge-ready',
   description: 'Repeat the adversarial code review over a scope, re-scouting the finders each round, until a round fixes nothing medium or higher that changes production behaviour and fewer than half its finders reported a medium-or-higher fix; then simplify the same scope',
   phases: [
+    { title: 'Prepare', detail: 'Sonnet runs the commands listing the files in scope, the untracked files and the dirty paths at launch', model: 'sonnet' },
     { title: 'Scout', detail: 'the session model (or args.model) at medium effort designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
     { title: 'Triage', detail: 'Opus classifies each fixed medium-or-higher finding by the kinds of change in its hunks; a production kind means another round', model: 'opus' },
@@ -50,9 +51,6 @@ for (const key of ['checks', 'checkCmd', 'excludePattern', 'model', 'intent']) {
   if (input[key] !== undefined && (typeof input[key] !== 'string' || !input[key].trim())) {
     throw new Error(`args.${key}: a non-empty string when given; omit it otherwise`)
   }
-}
-for (const key of ['files', 'dirtyAtLaunch', 'untracked']) {
-  if (!Array.isArray(input[key])) throw new Error(`args.${key}: string[] is required; pass [] when there is none`)
 }
 if (input.scope === 'codebase'
   ? input.loopStart !== undefined
@@ -212,7 +210,7 @@ function triagePrompt(round, candidates, findings) {
     const fix = fixer || c
     const via = fixer ? `\nFixed by the change for finding #${fixer.id} "${fixer.title}", which covers it.` : ''
     const hunks = fix.hunks && fix.hunks.trim() ? `\nHunks:\n${fix.hunks.trim()}` : ''
-    return `Finding #${c.id} [${c.severity}] ${c.title}\nLocation: ${c.file}:${c.line}\nDescription: ${c.description}${via}\nFix: ${fixLocation(fix)}${hunks}`
+    return `Finding #${c.id} [${c.severity}] ${c.title}\nLocation: ${c.file}:${c.line}${via}\nFix: ${fixLocation(fix)}${hunks}`
   }).join('\n\n')
   return `${CONTEXT}
 
@@ -224,6 +222,194 @@ ${kindList}
 A fix carries every kind its hunks contain: one that changed a comment and a query is comment and logic. Read each fix's hunks (from its commit, or pasted below for a fix left uncommitted), list a production kind only when a hunk changes what shipped code does, and quote that hunk in the reason. One verdict per finding id.
 
 ${blocks}`
+}
+
+// ---------- the launch state, computed here ----------
+
+// The launching session names the scope; the lists are read here, so a scope
+// of thousands of files never passes through its context. Nothing but this
+// loop's implementers writes to the tree between rounds (a cleanup that cannot
+// restore it stops the loop), so every later round's state is this one plus
+// what the fixes so far touched.
+const GIT = 'git -c core.quotePath=false'
+const PREPARE_OPTS = { model: 'sonnet', effort: 'low' }
+const shellQuote = (s) => `'${s.replace(/'/g, `'\\''`)}'`
+
+// --no-renames lists both sides of a rename.
+const PREPARE_SECTIONS = [
+  { name: 'files', cmd: SCOPE === 'codebase' ? `${GIT} ls-files` : `${GIT} diff --name-only ${BASE}` },
+  { name: 'untracked', cmd: `${GIT} ls-files -o --exclude-standard` },
+  { name: 'dirty', cmd: `{ ${GIT} diff --name-only --no-renames HEAD; ${GIT} ls-files -o --exclude-standard; } || :` },
+]
+
+const COPY_SCHEMA = {
+  type: 'object',
+  properties: {
+    output: { type: 'string', description: 'The command\'s output, verbatim.' },
+    declined: { type: 'string', description: 'Only when you did not run the command: why, in one sentence. Leave output empty then.' },
+  },
+  required: ['output'],
+}
+
+// A cheap agent sorting several outputs into several fields once returned an
+// empty list its own command had just printed paths for, so the agent copies
+// one block of output and the script splits it on marker lines. The harness
+// swaps a Bash result over about 30 KB for a pointer to a file, which the
+// agent pages through and reassembles by hand, losing lines; so the output is
+// copied in parts that each fit one Bash result, each checked against its
+// cksum. Every part re-runs the same read-only commands in the repository:
+// agents asked to relay an opaque temp file refused it as a smuggled signal.
+const MARKER = '::section::'
+const CHUNK_BYTES = 20000
+
+function copyBody(sections) {
+  const body = sections.map((sec) => `echo '${MARKER} ${sec.name}'\n${sec.cmd}`).join('\n')
+  return `cd ${shellQuote(ROOT)} && (
+${body}
+echo '${MARKER} end'
+)`
+}
+
+function copyIntro(what) {
+  return `You are a helper of the merge-ready workflow the user launched on the repository ${ROOT}. The workflow's script cannot run commands itself, so it asks you to run one and hand back its output: ${what}. The command only reads git state; it changes nothing. The \`${MARKER}\` lines are headers the script splits the output on.`
+}
+
+const COPY_RULE = 'Return its entire output verbatim as `output`: every line, in order, nothing added, removed or reworded. The script checks the copy against a checksum. There is nothing to review in it, so you need not open any file.'
+
+function copyPrompt(sections, what) {
+  const ranges = `awk -v max=${CHUNK_BYTES} '{ l = length($0) + 1; if (n && b + l > max) { print s, NR - 1; n = 0; b = 0 } if (!n) s = NR; n++; b += l } END { if (n) print s, NR }' "$f"`
+  return `${copyIntro(what)} A Bash result over about 30 KB comes back cut, so the command numbers the output's lines into parts of at most ${CHUNK_BYTES} bytes, prints one \`::part::\` line per part (first line, last line, cksum), then the first part itself; other helpers fetch the remaining parts.
+
+Run exactly this shell command via Bash, unmodified, as a single call:
+
+f=$(mktemp) && ${copyBody(sections)} > "$f" && r=$(${ranges}) && echo "$r" | while read -r s e; do echo "::part:: $s $e $(sed -n "$s,\${e}p" "$f" | cksum)"; done && sed -n "$(echo "$r" | head -n 1 | tr ' ' ',')p" "$f"; rm -f "$f"
+
+${COPY_RULE}`
+}
+
+function chunkPrompt(sections, what, chunk, index, count) {
+  return `${copyIntro(what)} A Bash result over about 30 KB comes back cut, so the output is fetched in ${count} parts; this is part ${index}, lines ${chunk.start} to ${chunk.end}, which the \`sed\` at the end keeps.
+
+Run exactly this shell command via Bash, unmodified, as a single call:
+
+${copyBody(sections)} | sed -n '${chunk.start},${chunk.end}p'
+
+${COPY_RULE}`
+}
+
+// The first copy carries one line per part with its line range and cksum,
+// then the first part itself.
+function parseHead(output) {
+  const lines = String(output || '').split('\n').map((l) => l.replace(/\r$/, ''))
+  const chunks = []
+  let i = 0
+  for (; i < lines.length; i++) {
+    const c = /^::part:: (\d+) (\d+) (\d+) (\d+)\s*$/.exec(lines[i])
+    if (c) chunks.push({ start: +c[1], end: +c[2], crc: +c[3], bytes: +c[4] })
+    else if (chunks.length) break
+  }
+  if (!chunks.length || chunks.some((c, k) => c.start !== (k ? chunks[k - 1].end + 1 : 1) || c.end < c.start)) return null
+  const first = verifyChunk(lines.slice(i).join('\n'), chunks[0])
+  return first ? { chunks, first } : null
+}
+
+// A chunk's lines, or null unless they are byte for byte the ones sed printed.
+// A missing trailing blank line is restored, and the copy is tried again
+// without the code fence lines an agent may wrap it in.
+function verifyChunk(text, chunk) {
+  const lines = String(text || '').split('\n').map((l) => l.replace(/\r$/, ''))
+  const fence = (l) => /^\s*```\S*\s*$/.test(l)
+  const bare = lines.slice(fence(lines[0] || '') ? 1 : 0)
+  while (bare.length && bare[bare.length - 1] === '') bare.pop()
+  if (bare.length && fence(bare[bare.length - 1])) bare.pop()
+  const n = chunk.end - chunk.start + 1
+  for (const candidate of [lines, bare]) {
+    const c = candidate.slice()
+    while (c.length > n && c[c.length - 1] === '') c.pop()
+    while (c.length < n) c.push('')
+    if (c.length !== n) continue
+    const bytes = utf8(c.map((l) => `${l}\n`).join(''))
+    if (bytes.length === chunk.bytes && cksum(bytes) === chunk.crc) return c
+  }
+  return null
+}
+
+// POSIX cksum: CRC-32 with polynomial 0x04C11DB7, MSB first, over the bytes
+// and then the byte count, inverted.
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n << 24
+  for (let k = 0; k < 8; k++) c = c & 0x80000000 ? (c << 1) ^ 0x04c11db7 : c << 1
+  return c >>> 0
+})
+
+function cksum(bytes) {
+  let crc = 0
+  const step = (b) => { crc = ((crc << 8) ^ CRC_TABLE[((crc >>> 24) ^ b) & 0xff]) >>> 0 }
+  for (const b of bytes) step(b)
+  for (let n = bytes.length; n > 0; n = Math.floor(n / 256)) step(n & 0xff)
+  return ~crc >>> 0
+}
+
+function utf8(s) {
+  const out = []
+  for (const ch of s) {
+    const c = ch.codePointAt(0)
+    if (c < 0x80) out.push(c)
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63))
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+  }
+  return out
+}
+
+// Null when the output is not one complete run of the command: a missing
+// section or end marker means lines were lost.
+function parseCopy(lines, sections) {
+  const raw = {}
+  let current = null
+  for (const line of lines) {
+    const marker = new RegExp(`^\\s*${MARKER} (\\w+)\\s*$`).exec(line)
+    if (marker) {
+      current = marker[1]
+      raw[current] = []
+      continue
+    }
+    if (current) raw[current].push(line)
+  }
+  if (!raw.end) return null
+  const value = {}
+  for (const sec of sections) {
+    if (!raw[sec.name]) return null
+    value[sec.name] = [...new Set(raw[sec.name].map((l) => l.trim()).filter((l) => l && !l.startsWith('```')))].sort()
+  }
+  return value
+}
+
+// The first copy runs the command and lays out the parts; the parts past the
+// first are copied in parallel. A copy that fails its check, or an agent that
+// declines, is retried once; the second failure ends the step.
+async function runCopy(sections, what, label, phaseName, opts) {
+  const head = await copyAttempts(copyPrompt(sections, what), label, phaseName, opts, parseHead)
+  if (!head.value) return head
+  const { chunks, first } = head.value
+  const rest = await parallel(chunks.slice(1).map((chunk, k) => () =>
+    copyAttempts(chunkPrompt(sections, what, chunk, k + 2, chunks.length), `${label} part ${k + 2}`, phaseName, opts, (out) => verifyChunk(out, chunk))))
+  const failed = rest.findIndex((r) => !r || !r.value)
+  if (failed >= 0) return { value: null, error: rest[failed] ? rest[failed].error : `the ${label} part ${failed + 2} copy threw` }
+  const value = parseCopy([...first, ...rest.flatMap((r) => r.value)], sections)
+  return value ? { value, error: null } : { value: null, error: `the ${label} output lacks a section marker` }
+}
+
+async function copyAttempts(prompt, label, phaseName, opts, parse) {
+  const failures = []
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const r = await run(prompt, { label: `${label}.${attempt}`, phase: phaseName, schema: COPY_SCHEMA, ...opts })
+    const declined = r && r.declined && r.declined.trim()
+    const value = r && !declined ? parse(r.output) : null
+    if (value) return { value, error: null }
+    failures.push(!r ? 'died' : declined ? `declined to run the command (${declined})` : 'returned an output that failed its check')
+  }
+  return { value: null, error: `the ${label} agent ${failures[0] === failures[1] ? `${failures[0]} twice` : `${failures[0]}, then ${failures[1]}`}` }
 }
 
 // ---------- helpers ----------
@@ -298,14 +484,19 @@ const excludedKindsTable = {}
 
 log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_ROUNDS} review round(s), scout and implementers on ${MODEL || 'the session model'}, simplify afterwards`)
 
-for (let round = 1; round <= MAX_ROUNDS; round++) {
+phase('Prepare')
+const { value: launch, error: prepareError } = await runCopy(PREPARE_SECTIONS, 'the file lists the review loop starts from', 'prepare', 'Prepare', PREPARE_OPTS)
+if (!launch) {
+  stopReason = 'prepare-failed'
+  stopDetail = prepareError
+  log(`the launch state could not be read: ${prepareError}`)
+}
+
+for (let round = 1; launch && round <= MAX_ROUNDS; round++) {
   phase('Scout')
-  // Nothing but this loop's implementers writes to the tree between rounds (a
-  // cleanup that cannot restore it stops the loop), so a round's state is the
-  // launch state plus what the fixes so far touched, and no agent re-reads it.
-  const dirtyAtLaunch = [...new Set([...input.dirtyAtLaunch, ...allUncommittedFixFiles])].sort()
-  const untracked = [...new Set(input.untracked)].sort()
-  const inScope = [...new Set([...input.files, ...untracked, ...allFixes.flatMap((f) => f.files || [])])].sort()
+  const dirtyAtLaunch = [...new Set([...launch.dirty, ...allUncommittedFixFiles])].sort()
+  const untracked = launch.untracked
+  const inScope = [...new Set([...launch.files, ...untracked, ...allFixes.flatMap((f) => f.files || [])])].sort()
   if (inScope.length === 0) {
     stopReason = 'scope-empty'
     stopDetail = `round ${round} found nothing in scope`
@@ -337,14 +528,9 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   if (INTENT_NOTE) reviewArgs.intent = INTENT_NOTE
   const { result: review, error } = await runChild(input.reviewScript, reviewArgs, 'review workflow')
 
-  const entry = {
-    round,
-    unassignedFiles: missing,
-    review,
-    error,
-    triage: null,
-    decision: null,
-  }
+  const entry = { round, review, triage: null, decision: null }
+  if (missing.length) entry.unassignedFiles = missing
+  if (error) entry.error = error
   rounds.push(entry)
   if (!review) {
     stopReason = 'review-failed'
@@ -472,8 +658,6 @@ if (stopReason !== 'converged') {
 log(`done: ${rounds.length} review round(s), stop reason ${stopReason}, ${allFixes.length} fix(es) in total, simplify ${simplify.ran ? 'ran' : `skipped (${simplify.skipped})`}`)
 
 return {
-  scope: SCOPE,
-  base: BASE,
   model: MODEL || null,
   checksConfigured: CHECKS !== null,
   excludedKinds: excludedKindsTable,

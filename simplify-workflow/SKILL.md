@@ -5,7 +5,7 @@ argument-hint: "<uncommitted|branch|unpushed|codebase> [model effort]"
 disable-model-invocation: true
 ---
 
-A Workflow converges the scoped code to a stable simplified form. Each round runs find, judge, apply over batches of files: fresh finders propose, independent judges strike what is not a genuine improvement, and appliers implement only what survives. Rounds repeat until a confirmation sweep applies nothing and the tree hash lands on an already-seen state. A comment-pruning phase follows convergence. You orchestrate from outside the loop: resolve the scope, say what is source, launch the workflow, relay its result. The workflow lists the files and hashes the tree itself. The loop mechanics, embedded prompts, and comment-classification rules live in [simplify.mjs](simplify.mjs) in this skill's folder; running it needs nothing from inside it.
+A Workflow runs find, judge, apply rounds over batches of the scoped files until a confirmation sweep applies nothing, then prunes non-useful comments. You resolve the scope, say what is source, launch and relay the result; the workflow lists the files itself, and the mechanics live in [simplify.mjs](simplify.mjs), which running it needs nothing from inside.
 
 ## Steps
 
@@ -27,7 +27,7 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
    (^|/)(node_modules|vendor|third_party|dist|build|target|generated)/|\.min\.|(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|go\.sum)$|\.(json|jsonl|csv|tsv|md|mdx|lock|snap|svg|png|jpe?g|gif|ico|webp|pdf|woff2?|ttf|otf|eot|zip|gz|wasm|so|dylib|dll|exe|bin)$
    ```
 
-4. **Discover the project's check command.** Look for how this project verifies itself: `package.json` scripts (`typecheck`, `test`, `lint`, `check`), a `Makefile` or `justfile` target, instructions in CLAUDE.md/AGENTS.md, or the language's convention (`cargo check && cargo test`, `go vet ./... && go test ./...`, `pytest`, etc.). Compose a single non-interactive command, preferring typecheck plus tests joined with `&&`; never a watch mode. Sanity-check it by running it once via Bash from the project root. Failing checks are fine (the workflow baselines them so pre-existing failures are never attributed to the run), but if the command itself cannot run (unknown script, missing tooling), discard it. If nothing trustworthy is found, omit `checkCmd`; the workflow then skips both the baseline and the fix-up.
+4. **Discover the project's check command.** Look for how this project verifies itself: `package.json` scripts (`typecheck`, `test`, `lint`, `check`), a `Makefile` or `justfile` target, instructions in CLAUDE.md/AGENTS.md, or the language's convention (`cargo check && cargo test`, `go vet ./... && go test ./...`, `pytest`, etc.). Compose a single non-interactive command, preferring typecheck plus tests joined with `&&`; never a watch mode. Sanity-check it by running it once via Bash from the project root. Failing checks are fine (the workflow baselines them), but if the command itself cannot run (unknown script, missing tooling), discard it. If nothing trustworthy is found, omit `checkCmd`; the workflow then skips both the baseline and the fix-up.
 
 5. **Launch the workflow.** First resolve the absolute path of [simplify.mjs](simplify.mjs); it sits next to this SKILL.md, in the directory named by the `Base directory for this skill:` line of this skill's invocation. Substitute the resolved path below:
 

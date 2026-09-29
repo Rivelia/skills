@@ -158,7 +158,13 @@ function findingText(e) {
   const sev = e.finalSeverity ?? e.severity
   const title = e.finalTitle ?? e.title
   const desc = e.finalDescription ?? e.description
-  return `Finding #${e.id} [${sev}] ${title}\nLocation: ${e.file}:${e.line}\nReported by finder: ${e.dimension}\nDescription: ${desc}\nEvidence: ${e.evidence}\nSuggested fix: ${e.suggestedFix}`
+  return `Finding #${e.id} [${sev}] ${title}\nLocation: ${e.file}:${e.line}\nDescription: ${desc}\nEvidence: ${e.evidence}\nSuggested fix: ${e.suggestedFix}`
+}
+
+// A confirmed finding without the finder's evidence and suggested fix, for the
+// agents that read the code or the applied fix instead.
+function briefText(e) {
+  return `Finding #${e.id} [${e.finalSeverity}] ${e.finalTitle ?? e.title}\nLocation: ${e.file}:${e.line}\nDescription: ${e.finalDescription ?? e.description}`
 }
 
 // ---------- schemas ----------
@@ -246,7 +252,7 @@ const IMPL_SCHEMA = {
     hunks: { type: 'string', description: 'The `git diff` of your change when you left it uncommitted; empty when you committed it (the commit carries it) and unless outcome is applied.' },
     committed: { type: 'boolean' },
     commitSha: { type: ['string', 'null'] },
-    notes: { type: 'string', description: 'Anything beyond the finding that a more complete fix would need.' },
+    notes: { type: 'string', description: 'Anything beyond the finding that a more complete fix would need; empty when nothing.' },
   },
   required: ['outcome', 'plan', 'reason', 'excludedKind', 'files', 'hunks', 'committed', 'commitSha', 'notes'],
 }
@@ -386,7 +392,7 @@ The lead of a cluster is the finding whose location is where the single change g
 Read the code at each location before deciding. Every finding id must appear in exactly one cluster (a singleton cluster is fine).
 
 Confirmed findings:
-${confirmed.map((e) => `Finding #${e.id} [${e.finalSeverity}] ${e.finalTitle ?? e.title}\nLocation: ${e.file}:${e.line}\nDescription: ${e.finalDescription ?? e.description}`).join('\n\n')}`
+${confirmed.map(briefText).join('\n\n')}`
 }
 
 // Files never swept into a commit or restored with git: the user's uncommitted
@@ -446,7 +452,7 @@ ${READ_ONLY}
 You are checking a cluster SIBLING. The clustering agent said one change fixes both finding #${lead.id} and the sibling below. The fix for #${lead.id} has been applied (${where}).
 
 Lead finding:
-${findingText(lead)}
+${briefText(lead)}
 
 Sibling finding to check:
 ${findingText(s)}
@@ -708,8 +714,9 @@ function reported(e) {
     severity: e.finalSeverity ?? e.severity,
     status: e.status,
   }
-  // A refuted finding is reported by its title and the skeptic's reason alone.
-  if (e.status !== 'refuted') f.description = e.finalDescription ?? e.description
+  // A refuted finding is reported by its title and the skeptic's reason, a
+  // fixed or covered one by its title and the fix.
+  if (e.status !== 'refuted' && e.outcome !== 'fixed' && e.outcome !== 'covered') f.description = e.finalDescription ?? e.description
   if (e.corrected) f.corrected = true
   if (e.alsoReportedBy.length) f.alsoReportedBy = e.alsoReportedBy
   if (e.status === 'refuted') Object.assign(f, { refutedBy: e.refutedBy, refuteReason: e.refuteReason })
@@ -718,7 +725,8 @@ function reported(e) {
   f.outcome = e.outcome
   const impl = e.implementation
   if (e.outcome === 'fixed') {
-    Object.assign(f, { commitSha: e.commitSha, files: impl.files, notes: impl.notes })
+    Object.assign(f, { commitSha: e.commitSha, files: impl.files })
+    if (impl.notes && impl.notes.trim()) f.notes = impl.notes
     // The merge-ready triage reads an uncommitted fix's hunks; a commit carries its own.
     if (!e.committed && impl.hunks) f.hunks = impl.hunks
   } else if (e.outcome === 'covered') {
@@ -732,9 +740,7 @@ function reported(e) {
 }
 
 return {
-  scope: input.scope,
   implementerModel: IMPLEMENTER_MODEL,
-  base: BASE,
   checksConfigured: CHECKS !== null,
   // Only the exclusions a finding was refused under: the report quotes no other.
   excludedKinds: Object.fromEntries(EXCLUSION_KEYS.filter((k) => registry.some((e) => e.outcome === 'not_fixed' && e.implementation.excludedKind === k)).map((k) => [k, EXCLUSIONS[k]])),

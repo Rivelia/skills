@@ -5,7 +5,7 @@ argument-hint: "<uncommitted|branch|unpushed|codebase> [model]"
 disable-model-invocation: true
 ---
 
-A Workflow reviews the scoped code: one finder per review dimension proposes defects, a dedup check attaches duplicates at intake, two skeptics attack each finding (materiality, then technical truth), a clustering agent groups the confirmed ones by root cause, and one implementer per cluster applies the smallest fix that closes the finding, unless it is an excluded kind, and commits it. You orchestrate from outside: resolve the scope, scout the dimensions, describe the project, launch, report. The phase mechanics, models, efforts, prompts and excluded kinds live in [review.mjs](review.mjs) in this skill's folder; running it needs nothing from inside it.
+A Workflow reviews the scoped code: one finder per dimension, two skeptics per finding, one implementer per root-cause cluster that commits the smallest fix unless it is an excluded kind. You resolve the scope, scout the dimensions, describe the project, launch and report; the mechanics live in [review.mjs](review.mjs), and running it needs nothing from inside it.
 
 ## Steps
 
@@ -21,8 +21,8 @@ A Workflow reviews the scoped code: one finder per review dimension proposes def
 
 2. **Record the launch state**, via Bash from the project root:
    - `root`: the absolute project root.
-   - `dirtyAtLaunch`: every path `git status --porcelain` lists, modified and untracked alike, as plain paths. Implementers treat these as the user's work: they never stage or restore them, and a fix that touches one stays uncommitted. Pass `[]` for a clean tree.
-   - `untracked`: `git ls-files -o --exclude-standard`. Finders read these whole, since they have no diff against the base. Pass `[]` when there are none.
+   - `dirtyAtLaunch`: every path `git status --porcelain` lists, modified and untracked alike, as plain paths. Pass `[]` for a clean tree.
+   - `untracked`: `git ls-files -o --exclude-standard`. Pass `[]` when there are none.
 
 3. **Scout the shape of the scope**, not its content: `git diff --stat <BASE>` plus the untracked paths, or for `codebase` the tracked file list with line counts. If the scope is empty, report that there is nothing to review and stop without launching.
 
@@ -30,7 +30,7 @@ A Workflow reviews the scoped code: one finder per review dimension proposes def
 
 4. **Describe the project** in `context`, a string every agent reads: the stack, where the agent docs live (CLAUDE.md, AGENTS.md, docs the skeptics must quote before invoking a convention), where ADRs or domain docs live (the materiality skeptic checks documented tradeoffs there), and the commit-message convention implementers follow (name the doc, or state it). `context` describes the project; the diff's risks are the finders' to discover. A hypothesis written there ("the key risk is guidance lost in the move") is read by every finder and skeptic and comes back as a finding in every dimension.
 
-   Record the author's intent. For a diff-bounded scope, set `authorEnd` to `git rev-parse HEAD`: the agents read the author's commits, `<BASE>..authorEnd`, themselves. When the user said what the diff deliberately does, put that note verbatim in `intent`; omit it otherwise. The finders and the materiality skeptic treat a removal the intent states as a decision to test for breakage rather than a loss to restore.
+   Record the author's intent. For a diff-bounded scope, set `authorEnd` to `git rev-parse HEAD`: the agents read the author's commits, `<BASE>..authorEnd`, themselves. When the user said what the diff deliberately does, put that note verbatim in `intent`; omit it otherwise.
 
    Then discover the project's check commands and put them in `checks`: typecheck, lint and how to run the tests that cover a given file, from `package.json` scripts, a Makefile, the agent docs, or the language's convention. Name them as commands the implementer can run on the files it touched, never a watch mode. Confirm each script or target exists; if nothing trustworthy is found, omit `checks` and the implementers verify by reading.
 
