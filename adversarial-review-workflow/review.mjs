@@ -3,9 +3,9 @@ export const meta = {
   description: 'Adversarial code review over a scope: finders per dimension, dedup at intake, two skeptics per finding, root-cause clustering, implementers that commit their own fix',
   phases: [
     { title: 'Prepare', detail: 'Sonnet lists the untracked and the dirty paths at launch, unless args carry them', model: 'sonnet' },
-    { title: 'Find', detail: 'one Opus finder per dimension', model: 'opus' },
+    { title: 'Find', detail: 'one finder per dimension: Opus at medium effort for production code, Sonnet at high effort for a dimension with production=false', model: 'opus' },
     { title: 'Dedup', detail: 'Sonnet intake check against the registered findings in the same file', model: 'sonnet' },
-    { title: 'Verify', detail: 'materiality skeptic, then technical skeptic', model: 'opus' },
+    { title: 'Verify', detail: 'Sonnet materiality skeptic, then Sonnet technical skeptic; their verdicts gate the finding and grade the report, never what the implementer reads', model: 'sonnet' },
     { title: 'Cluster', detail: 'group confirmed findings by root cause', model: 'opus' },
     { title: 'Implement', detail: 'one implementer per cluster (the session model unless args.implementerModel overrides), strictly sequential, commits its own fix' },
     { title: 'Cover', detail: 'Opus check whether a cluster fix also closes its siblings', model: 'opus' },
@@ -37,11 +37,14 @@ if ((input.dirtyAtLaunch === undefined) !== (input.untracked === undefined)
   throw new Error('args.dirtyAtLaunch and args.untracked: pass both as string[] or omit both to have the workflow list them')
 }
 if (!Array.isArray(input.dimensions) || input.dimensions.length === 0) {
-  throw new Error('args.dimensions: non-empty [{key, title, focus, files: string[]}] is required; a files entry ending in / stands for every file in scope under that directory')
+  throw new Error('args.dimensions: non-empty [{key, title, focus, files: string[], production?: boolean}] is required; a files entry ending in / stands for every file in scope under that directory')
 }
 for (const d of input.dimensions) {
   if (!d || !d.key || !d.title || !d.focus || !Array.isArray(d.files) || d.files.length === 0) {
     throw new Error(`args.dimensions: every entry needs key, title, focus and a non-empty files list (offending: ${JSON.stringify(d)})`)
+  }
+  if (d.production !== undefined && typeof d.production !== 'boolean') {
+    throw new Error(`args.dimensions: production is a boolean when given (offending: ${JSON.stringify(d)})`)
   }
 }
 if (typeof input.context !== 'string' || !input.context.trim()) {
@@ -75,15 +78,19 @@ const AUTHOR_END = input.authorEnd || null
 // The implementers inherit the session model unless the user picked another; effort stays tied to severity.
 const IMPLEMENTER_MODEL = input.implementerModel ? input.implementerModel.trim() : null
 
-const FINDER_OPTS = { model: 'opus', effort: 'medium' }
+// A dimension holding no production code (docs, tests, CI) gets a Sonnet finder
+// at high effort; any other, including one that omits production, gets Opus.
+const finderOpts = (d) => (d.production === false ? { model: 'sonnet', effort: 'high' } : { model: 'opus', effort: 'medium' })
 const DEDUP_OPTS = { model: 'sonnet', effort: 'medium' }
 const CLUSTER_OPTS = { model: 'opus', effort: 'medium' }
 const SIBLING_OPTS = { model: 'opus', effort: 'high' }
 const CLEANUP_OPTS = { model: 'sonnet', effort: 'low' }
-// The materiality skeptic runs before the severity is settled, so it scales on
-// the finder's claim; the technical skeptic scales on the settled severity.
-const materialityOpts = (severity) => ({ model: 'opus', effort: ['nit', 'low'].includes(severity) ? 'medium' : 'high' })
-const technicalOpts = (severity) => ({ model: 'opus', effort: { nit: 'low', low: 'medium' }[severity] ?? 'high' })
+// The skeptics run once per finding, so they run on Sonnet; what they settle
+// (severity, corrected wording) reaches the report only, never the clustering,
+// the sibling check or the implementer. Both run at high effort except on a
+// nit, taken as the higher of the finder's and the settled severity so that a
+// downgrade never lowers the technical skeptic's effort.
+const skepticOpts = (...severities) => ({ model: 'sonnet', effort: severities.every((s) => s === 'nit') ? 'medium' : 'high' })
 const implementerOpts = (severity) => ({ ...(IMPLEMENTER_MODEL ? { model: IMPLEMENTER_MODEL } : {}), effort: { nit: 'low', low: 'medium' }[severity] ?? 'high' })
 
 // ---------- shared prompt fragments ----------
@@ -136,7 +143,7 @@ const NON_INFERABLE_CONTRACT = 'a format, a limit, a fact about the environment,
 const HOLLOW_TEST = "recomputes the implementation's formula from the same constants, or asserts what a stub or hand-written mock returns"
 
 // Clustering, the sibling check and the technical skeptic judge neither
-// severity nor intent, and the implementer works from a settled severity, so
+// severity nor intent, and the implementer works from the finder's severity, so
 // each agent gets only the parts it uses.
 const PROJECT = `Repository: ${ROOT}.
 ${input.context.trim()}
@@ -164,19 +171,17 @@ const EXCLUSIONS = {
 const EXCLUSION_KEYS = Object.keys(EXCLUSIONS)
 const EXCLUDED = `Never auto-applied; report the key as excludedKind:\n${EXCLUSION_KEYS.map((k) => `- ${k}: ${EXCLUSIONS[k]}`).join('\n')}`
 
-// The skeptics and the sibling check judge the defect, not how to fix it, so
-// they get the finding without the finder's suggested fix.
+// Every agent reads the finding as the finder wrote it: the skeptics' severity
+// and corrections are for the report. The skeptics and the sibling check judge
+// the defect, not how to fix it, so they get it without the suggested fix.
 function findingText(e, withFix = true) {
-  const sev = e.finalSeverity ?? e.severity
-  const title = e.finalTitle ?? e.title
-  const desc = e.finalDescription ?? e.description
-  return `Finding #${e.id} [${sev}] ${title}\nLocation: ${e.file}:${e.line}\nDescription: ${desc}\nEvidence: ${e.evidence}${withFix ? `\nSuggested fix: ${e.suggestedFix}` : ''}`
+  return `Finding #${e.id} [${e.severity}] ${e.title}\nLocation: ${e.file}:${e.line}\nDescription: ${e.description}\nEvidence: ${e.evidence}${withFix ? `\nSuggested fix: ${e.suggestedFix}` : ''}`
 }
 
 // A confirmed finding without the finder's evidence and suggested fix, for the
 // agents that read the code or the applied fix instead.
 function briefText(e) {
-  return `Finding #${e.id} [${e.finalSeverity}] ${e.finalTitle ?? e.title}\nLocation: ${e.file}:${e.line}\nDescription: ${e.finalDescription ?? e.description}`
+  return `Finding #${e.id} [${e.severity}] ${e.title}\nLocation: ${e.file}:${e.line}\nDescription: ${e.description}`
 }
 
 // ---------- schemas ----------
@@ -383,7 +388,7 @@ function technicalPrompt(e) {
 
 ${READ_ONLY}
 
-You are the TECHNICAL skeptic in an adversarial code review. Your job is to attack whether this finding is technically true, refuting by default when uncertain whether the failure mechanism is real at all. A materiality skeptic already confirmed it matters at severity ${e.finalSeverity}.
+You are the TECHNICAL skeptic in an adversarial code review. Your job is to attack whether this finding is technically true, refuting by default when uncertain whether the failure mechanism is real at all. A materiality skeptic already confirmed it matters.
 
 ${findingText(e, false)}
 
@@ -391,7 +396,7 @@ Verify it yourself: read the code at the location and along the path the finding
 
 Your verdict is three-way:
 - refute: the mechanism does not exist, or the code already handles it, or the trigger cannot occur. Uncertainty about whether the mechanism is real at all defaults to refute.
-- confirm_corrected: a detail in the finding is wrong (bad arithmetic, misattributed cause, overstated scenario) but your own verification shows the underlying defect is real in a corrected form at the same location. Give the corrected description; the implementer will work from it. A correction must be something you actually verified, not a charitable reinterpretation.
+- confirm_corrected: a detail in the finding is wrong (bad arithmetic, misattributed cause, overstated scenario) but your own verification shows the underlying defect is real in a corrected form at the same location. Give the corrected description; the report carries it. A correction must be something you actually verified, not a charitable reinterpretation.
 - confirm_as_is: the finding is right as written.
 
 A wrong detail is only a kill ground when the failure mechanism collapses with it. Quote the code your verdict rests on.`
@@ -432,7 +437,7 @@ function checksText() {
 }
 
 function implementerPrompt(e, siblings) {
-  const sev = e.finalSeverity
+  const sev = e.severity
   const sibText = siblings.length
     ? `\nThis finding leads a cluster; the single change that fixes it should also fix these siblings (the clustering attached their files to your allowed set):\n${siblings.map((s) => findingText(s)).join('\n\n')}\n`
     : ''
@@ -702,7 +707,7 @@ function settledSeverity(mat, current) {
 }
 
 async function verify(e) {
-  const mat = await run(materialityPrompt(e), { label: `materiality #${e.id}`, phase: 'Verify', schema: MATERIALITY_SCHEMA, ...materialityOpts(e.severity) })
+  const mat = await run(materialityPrompt(e), { label: `materiality #${e.id}`, phase: 'Verify', schema: MATERIALITY_SCHEMA, ...skepticOpts(e.severity) })
   if (!mat) {
     e.status = 'agent_failed'
     e.failedAt = 'materiality skeptic'
@@ -717,7 +722,7 @@ async function verify(e) {
   }
   e.finalSeverity = settledSeverity(mat, e.severity)
 
-  const tech = await run(technicalPrompt(e), { label: `technical #${e.id}`, phase: 'Verify', schema: TECHNICAL_SCHEMA, ...technicalOpts(e.finalSeverity) })
+  const tech = await run(technicalPrompt(e), { label: `technical #${e.id}`, phase: 'Verify', schema: TECHNICAL_SCHEMA, ...skepticOpts(e.severity, e.finalSeverity) })
   if (!tech) {
     e.status = 'agent_failed'
     e.failedAt = 'technical skeptic'
@@ -787,10 +792,10 @@ if (input.untracked === undefined) {
 }
 
 phase('Find')
-log(`scope ${input.scope}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, ${DIMENSIONS.length} finder dimension(s), ${protectedFiles.size ? `${protectedFiles.size} path(s) dirty at launch` : 'tree clean at launch'}, implementers on ${IMPLEMENTER_MODEL || 'the session model'}`)
+log(`scope ${input.scope}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, ${DIMENSIONS.length} finder dimension(s) (${DIMENSIONS.filter((d) => d.production === false).length} on Sonnet), ${protectedFiles.size ? `${protectedFiles.size} path(s) dirty at launch` : 'tree clean at launch'}, implementers on ${IMPLEMENTER_MODEL || 'the session model'}`)
 
 await parallel(DIMENSIONS.map((d) => async () => {
-  const res = await run(finderPrompt(d), { label: `find: ${d.key}`, phase: 'Find', schema: FINDINGS_SCHEMA, ...FINDER_OPTS })
+  const res = await run(finderPrompt(d), { label: `find: ${d.key}`, phase: 'Find', schema: FINDINGS_SCHEMA, ...finderOpts(d) })
   if (!res) {
     finderFailures.push(d.key)
     log(`finder ${d.key} failed; its dimension was not reviewed`)
@@ -835,7 +840,7 @@ if (confirmed.length === 1) {
   }
   log(`${clusters.length} cluster(s): ${clusters.map((cl) => `#${cl.leadId}{${cl.memberIds.join(',')}}`).join(' ')}`)
 }
-const sevRank = (e) => SEVERITIES.indexOf(e.finalSeverity)
+const sevRank = (e) => SEVERITIES.indexOf(e.severity)
 clusters.sort((a, b) => sevRank(byId(b.leadId)) - sevRank(byId(a.leadId)))
 
 // ---------- Implement, strictly sequential ----------
@@ -854,7 +859,7 @@ async function cleanup(why) {
 }
 
 async function implement(e, siblings) {
-  const impl = await run(implementerPrompt(e, siblings), { label: `implement #${e.id}`, phase: 'Implement', schema: IMPL_SCHEMA, ...implementerOpts(e.finalSeverity) })
+  const impl = await run(implementerPrompt(e, siblings), { label: `implement #${e.id}`, phase: 'Implement', schema: IMPL_SCHEMA, ...implementerOpts(e.severity) })
   if (!impl) {
     e.outcome = 'agent_failed'
     e.failedAt = 'implementer'
@@ -881,7 +886,7 @@ async function implement(e, siblings) {
   e.committed = impl.committed === true
   e.commitSha = e.committed ? impl.commitSha : null
   if (!e.committed) for (const f of impl.files) uncommittedFixFiles.add(f)
-  priorFixes.push({ id: e.id, title: e.finalTitle ?? e.title, sha: e.commitSha, files: impl.files })
+  priorFixes.push({ id: e.id, title: e.title, sha: e.commitSha, files: impl.files })
   log(`#${e.id} fixed${e.committed ? ` (commit ${e.commitSha})` : ' (left uncommitted)'}`)
 }
 

@@ -113,12 +113,13 @@ const CHANGE_KINDS = {
   logic: { production: true, text: 'a change to what shipped code does: application logic, data handling, queries, API handlers, UI behaviour; a helper local to the file it fixes is part of it' },
   config: { production: true, text: 'configuration the running product reads' },
   robustness: { production: true, text: 'a small guard or fallback with no user-visible effect today' },
+  instructions: { production: true, text: 'a prompt, tool description, skill or agent instructions the product loads' },
   rename: { production: false, text: 'a symbol renamed with every consumer updated and nothing else changed' },
   'dead-code': { production: false, text: 'unreachable or unused code removed' },
   types: { production: false, text: 'type annotations with no runtime effect' },
   format: { production: false, text: 'formatting only' },
   comment: { production: false, text: 'comments and docstrings' },
-  docs: { production: false, text: 'docs, agent docs, tool and prompt descriptions' },
+  docs: { production: false, text: 'docs and agent docs' },
   copy: { production: false, text: 'user-facing copy, error message text and translations' },
   'log-text': { production: false, text: 'log message text' },
   test: { production: false, text: 'tests, fixtures and test helpers, added or updated' },
@@ -139,8 +140,9 @@ const DIMENSIONS_SCHEMA = {
           title: { type: 'string', description: 'One line naming the slice.' },
           focus: { type: 'string', description: 'A paragraph naming the specific things to attack in these files.' },
           files: { type: 'array', items: { type: 'string' }, description: 'Paths exactly as listed in the prompt, or a directory ending in / for every file in scope under it.' },
+          production: { type: 'boolean', description: 'True when any of its files holds code or configuration the running product executes or reads; false only when every one is docs, comments, user-facing copy and translations, tests and fixtures, or CI and build configuration. A doc the product loads as instructions (a prompt, a skill, agent instructions) is production.' },
         },
-        required: ['key', 'title', 'focus', 'files'],
+        required: ['key', 'title', 'focus', 'files', 'production'],
       },
     },
   },
@@ -225,7 +227,7 @@ ${byDir ? `Files in scope (${inScope.length}), counted per directory; list a dir
 ${list}
 ${sizes}
 
-One finder runs per dimension. A dimension is a slice a single reviewer can hold in context and attack from one angle: a subsystem, a layer, or a cross-cutting concern such as authorization, i18n and docs, or tests and CI. Every file in scope belongs to at least one dimension; a file may appear in several when two angles both need it. A \`files\` entry ending in / stands for every file in scope under that directory: use one wherever a dimension takes a whole directory rather than spelling out its paths. \`focus\` is a paragraph naming the specific things to attack in those files: the mechanisms the diff introduced, the invariants it could break, the callers that depend on it. Past runs used five to nine dimensions for branches of forty to a hundred changed files; a small diff may need two. Use the paths and directories exactly as the scope names them.`
+One finder runs per dimension. A dimension is a slice a single reviewer can hold in context and attack from one angle: a subsystem, a layer, or a cross-cutting concern such as authorization, i18n and docs, or tests and CI. Every file in scope belongs to at least one dimension; a file may appear in several when two angles both need it. A \`files\` entry ending in / stands for every file in scope under that directory: use one wherever a dimension takes a whole directory rather than spelling out its paths. \`focus\` is a paragraph naming the specific things to attack in those files: the mechanisms the diff introduced, the invariants it could break, the callers that depend on it. \`production\` picks the finder's model: a dimension holding no production code gets a cheaper one, so keep docs, tests and CI in dimensions of their own when the scope has enough of them, and mark a dimension production whenever in doubt. Past runs used five to nine dimensions for branches of forty to a hundred changed files; a small diff may need two. Use the paths and directories exactly as the scope names them.`
 }
 
 function fixLocation(f) {
@@ -480,7 +482,7 @@ function normalizeDimensions(raw, inScope) {
     const stem = key
     for (let n = 2; keys.has(key); n++) key = `${stem}-${n}`
     keys.add(key)
-    dimensions.push({ key, title: d.title, focus: d.focus, files })
+    dimensions.push({ key, title: d.title, focus: d.focus, files, production: d.production !== false })
   }
   const covered = new Set(dimensions.flatMap((d) => d.files.flatMap(expand)))
   const missing = inScope.filter((f) => !covered.has(f))
@@ -492,6 +494,7 @@ function normalizeDimensions(raw, inScope) {
       title: 'Files the scout assigned to no dimension',
       focus: 'These files are in the review scope but the scout left them out of every dimension. Read their hunks (untracked files whole), work out what each change introduces, and attack it from the angle the change itself suggests: the invariants it could break, the callers that depend on it, the contradictions with docs or copy.',
       files: missing,
+      production: true,
     })
   }
   return { dimensions, missing }
