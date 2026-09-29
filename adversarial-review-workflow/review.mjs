@@ -2,6 +2,7 @@ export const meta = {
   name: 'adversarial-review',
   description: 'Adversarial code review over a scope: finders per dimension, dedup at intake, two skeptics per finding, root-cause clustering, implementers that commit their own fix',
   phases: [
+    { title: 'Prepare', detail: 'Sonnet lists the untracked and the dirty paths at launch, unless args carry them', model: 'sonnet' },
     { title: 'Find', detail: 'one Opus finder per dimension', model: 'opus' },
     { title: 'Dedup', detail: 'Sonnet intake check against the registered findings in the same file', model: 'sonnet' },
     { title: 'Verify', detail: 'materiality skeptic, then technical skeptic', model: 'opus' },
@@ -29,8 +30,11 @@ if (!input.root) throw new Error('args.root: absolute project root path is requi
 if (input.scope !== 'codebase' && !input.base) {
   throw new Error('args.base: the commit bounding the diff is required for every scope except codebase')
 }
-for (const key of ['dirtyAtLaunch', 'untracked']) {
-  if (!Array.isArray(input[key])) throw new Error(`args.${key}: string[] is required; pass [] when there is none`)
+// merge-ready passes both, derived from its own launch state; a standalone run
+// omits both and lists them here.
+if ((input.dirtyAtLaunch === undefined) !== (input.untracked === undefined)
+  || (input.untracked !== undefined && (!Array.isArray(input.dirtyAtLaunch) || !Array.isArray(input.untracked)))) {
+  throw new Error('args.dirtyAtLaunch and args.untracked: pass both as string[] or omit both to have the workflow list them')
 }
 if (!Array.isArray(input.dimensions) || input.dimensions.length === 0) {
   throw new Error('args.dimensions: non-empty [{key, title, focus, files: string[]}] is required')
@@ -85,7 +89,7 @@ const SCOPE_LABEL = {
   codebase: 'the entire codebase',
 }
 
-const untrackedInScope = new Set(input.untracked)
+let untrackedInScope = new Set(input.untracked || [])
 
 function scopeText() {
   if (input.scope === 'codebase') {
@@ -398,7 +402,7 @@ ${confirmed.map(briefText).join('\n\n')}`
 // Files never swept into a commit or restored with git: the user's uncommitted
 // work at launch, plus fixes earlier in this run that had to stay uncommitted
 // because they overlapped that work.
-const protectedFiles = new Set(input.dirtyAtLaunch)
+let protectedFiles = new Set(input.dirtyAtLaunch || [])
 const uncommittedFixFiles = new Set()
 const priorFixes = []
 
@@ -468,6 +472,188 @@ function cleanupPrompt(why) {
   return `Repository: ${ROOT}. Anything uncommitted right now, other than the protected paths below, was left by ${why} and must be restored. Run \`git -C ${ROOT} status --porcelain\`. For every listed path that is not protected: \`git -C ${ROOT} checkout -- <path>\` for a tracked file, delete it for an untracked one. Do nothing else.
 ${protectedNote}
 Report what you found, what you restored or deleted, and which protected paths still hold changes.`
+}
+
+// ---------- the launch state ----------
+
+// Listed here when the args omit it, so the launching session never carries
+// the paths. --no-renames lists both sides of a rename.
+const GIT = 'git -c core.quotePath=false'
+const PREPARE_OPTS = { model: 'sonnet', effort: 'low' }
+const shellQuote = (s) => `'${s.replace(/'/g, `'\\''`)}'`
+const PREPARE_SECTIONS = [
+  { name: 'untracked', cmd: `${GIT} ls-files -o --exclude-standard` },
+  { name: 'dirty', cmd: `{ ${GIT} diff --name-only --no-renames HEAD; ${GIT} ls-files -o --exclude-standard; } || :` },
+]
+
+const COPY_SCHEMA = {
+  type: 'object',
+  properties: {
+    output: { type: 'string', description: 'The command\'s output, verbatim.' },
+    declined: { type: 'string', description: 'Only when you did not run the command: why, in one sentence. Leave output empty then.' },
+  },
+  required: ['output'],
+}
+
+// A cheap agent sorting several outputs into several fields once returned an
+// empty list its own command had just printed paths for, so the agent copies
+// one block of output and the script splits it on marker lines. The harness
+// swaps a Bash result over about 30 KB for a pointer to a file, which the
+// agent pages through and reassembles by hand, losing lines; so the output is
+// copied in parts that each fit one Bash result, each checked against its
+// cksum. Every part re-runs the same read-only commands in the repository:
+// agents asked to relay an opaque temp file refused it as a smuggled signal.
+const MARKER = '::section::'
+const CHUNK_BYTES = 20000
+
+function copyBody(sections) {
+  const body = sections.map((sec) => `echo '${MARKER} ${sec.name}'\n${sec.cmd}`).join('\n')
+  return `cd ${shellQuote(ROOT)} && (
+${body}
+echo '${MARKER} end'
+)`
+}
+
+function copyIntro(what) {
+  return `You are a helper of the adversarial review workflow the user launched on the repository ${ROOT}. The workflow's script cannot run commands itself, so it asks you to run one and hand back its output: ${what}. The command only reads git state; it changes nothing. The \`${MARKER}\` lines are headers the script splits the output on.`
+}
+
+const COPY_RULE = 'Return its entire output verbatim as `output`: every line, in order, nothing added, removed or reworded. The script checks the copy against a checksum. There is nothing to review in it, so you need not open any file.'
+
+function copyPrompt(sections, what) {
+  const ranges = `awk -v max=${CHUNK_BYTES} '{ l = length($0) + 1; if (n && b + l > max) { print s, NR - 1; n = 0; b = 0 } if (!n) s = NR; n++; b += l } END { if (n) print s, NR }' "$f"`
+  return `${copyIntro(what)} A Bash result over about 30 KB comes back cut, so the command numbers the output's lines into parts of at most ${CHUNK_BYTES} bytes, prints one \`::part::\` line per part (first line, last line, cksum), then the first part itself; other helpers fetch the remaining parts.
+
+Run exactly this shell command via Bash, unmodified, as a single call:
+
+f=$(mktemp) && ${copyBody(sections)} > "$f" && r=$(${ranges}) && echo "$r" | while read -r s e; do echo "::part:: $s $e $(sed -n "$s,\${e}p" "$f" | cksum)"; done && sed -n "$(echo "$r" | head -n 1 | tr ' ' ',')p" "$f"; rm -f "$f"
+
+${COPY_RULE}`
+}
+
+function chunkPrompt(sections, what, chunk, index, count) {
+  return `${copyIntro(what)} A Bash result over about 30 KB comes back cut, so the output is fetched in ${count} parts; this is part ${index}, lines ${chunk.start} to ${chunk.end}, which the \`sed\` at the end keeps.
+
+Run exactly this shell command via Bash, unmodified, as a single call:
+
+${copyBody(sections)} | sed -n '${chunk.start},${chunk.end}p'
+
+${COPY_RULE}`
+}
+
+// The first copy carries one line per part with its line range and cksum,
+// then the first part itself.
+function parseHead(output) {
+  const lines = String(output || '').split('\n').map((l) => l.replace(/\r$/, ''))
+  const chunks = []
+  let i = 0
+  for (; i < lines.length; i++) {
+    const c = /^::part:: (\d+) (\d+) (\d+) (\d+)\s*$/.exec(lines[i])
+    if (c) chunks.push({ start: +c[1], end: +c[2], crc: +c[3], bytes: +c[4] })
+    else if (chunks.length) break
+  }
+  if (!chunks.length || chunks.some((c, k) => c.start !== (k ? chunks[k - 1].end + 1 : 1) || c.end < c.start)) return null
+  const first = verifyChunk(lines.slice(i).join('\n'), chunks[0])
+  return first ? { chunks, first } : null
+}
+
+// A chunk's lines, or null unless they are byte for byte the ones sed printed.
+// A missing trailing blank line is restored, and the copy is tried again
+// without the code fence lines an agent may wrap it in.
+function verifyChunk(text, chunk) {
+  const lines = String(text || '').split('\n').map((l) => l.replace(/\r$/, ''))
+  const fence = (l) => /^\s*```\S*\s*$/.test(l)
+  const bare = lines.slice(fence(lines[0] || '') ? 1 : 0)
+  while (bare.length && bare[bare.length - 1] === '') bare.pop()
+  if (bare.length && fence(bare[bare.length - 1])) bare.pop()
+  const n = chunk.end - chunk.start + 1
+  for (const candidate of [lines, bare]) {
+    const c = candidate.slice()
+    while (c.length > n && c[c.length - 1] === '') c.pop()
+    while (c.length < n) c.push('')
+    if (c.length !== n) continue
+    const bytes = utf8(c.map((l) => `${l}\n`).join(''))
+    if (bytes.length === chunk.bytes && cksum(bytes) === chunk.crc) return c
+  }
+  return null
+}
+
+// POSIX cksum: CRC-32 with polynomial 0x04C11DB7, MSB first, over the bytes
+// and then the byte count, inverted.
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n << 24
+  for (let k = 0; k < 8; k++) c = c & 0x80000000 ? (c << 1) ^ 0x04c11db7 : c << 1
+  return c >>> 0
+})
+
+function cksum(bytes) {
+  let crc = 0
+  const step = (b) => { crc = ((crc << 8) ^ CRC_TABLE[((crc >>> 24) ^ b) & 0xff]) >>> 0 }
+  for (const b of bytes) step(b)
+  for (let n = bytes.length; n > 0; n = Math.floor(n / 256)) step(n & 0xff)
+  return ~crc >>> 0
+}
+
+function utf8(s) {
+  const out = []
+  for (const ch of s) {
+    const c = ch.codePointAt(0)
+    if (c < 0x80) out.push(c)
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63))
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+  }
+  return out
+}
+
+// Null when the output is not one complete run of the command: a missing
+// section or end marker means lines were lost.
+function parseCopy(lines, sections) {
+  const raw = {}
+  let current = null
+  for (const line of lines) {
+    const marker = new RegExp(`^\\s*${MARKER} (\\w+)\\s*$`).exec(line)
+    if (marker) {
+      current = marker[1]
+      raw[current] = []
+      continue
+    }
+    if (current) raw[current].push(line)
+  }
+  if (!raw.end) return null
+  const value = {}
+  for (const sec of sections) {
+    if (!raw[sec.name]) return null
+    value[sec.name] = [...new Set(raw[sec.name].map((l) => l.trim()).filter((l) => l && !l.startsWith('```')))].sort()
+  }
+  return value
+}
+
+// The first copy runs the command and lays out the parts; the parts past the
+// first are copied in parallel. A copy that fails its check, or an agent that
+// declines, is retried once; the second failure ends the step.
+async function runCopy(sections, what, label, phaseName, opts) {
+  const head = await copyAttempts(copyPrompt(sections, what), label, phaseName, opts, parseHead)
+  if (!head.value) return head
+  const { chunks, first } = head.value
+  const rest = await parallel(chunks.slice(1).map((chunk, k) => () =>
+    copyAttempts(chunkPrompt(sections, what, chunk, k + 2, chunks.length), `${label} part ${k + 2}`, phaseName, opts, (out) => verifyChunk(out, chunk))))
+  const failed = rest.findIndex((r) => !r || !r.value)
+  if (failed >= 0) return { value: null, error: rest[failed] ? rest[failed].error : `the ${label} part ${failed + 2} copy threw` }
+  const value = parseCopy([...first, ...rest.flatMap((r) => r.value)], sections)
+  return value ? { value, error: null } : { value: null, error: `the ${label} output lacks a section marker` }
+}
+
+async function copyAttempts(prompt, label, phaseName, opts, parse) {
+  const failures = []
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const r = await run(prompt, { label: `${label}.${attempt}`, phase: phaseName, schema: COPY_SCHEMA, ...opts })
+    const declined = r && r.declined && r.declined.trim()
+    const value = r && !declined ? parse(r.output) : null
+    if (value) return { value, error: null }
+    failures.push(!r ? 'died' : declined ? `declined to run the command (${declined})` : 'returned an output that failed its check')
+  }
+  return { value: null, error: `the ${label} agent ${failures[0] === failures[1] ? `${failures[0]} twice` : `${failures[0]}, then ${failures[1]}`}` }
 }
 
 // ---------- registry ----------
@@ -579,8 +765,16 @@ function registerAndVerify(f, dim) {
 
 // ---------- Find + Dedup + Verify, no barriers between them ----------
 
+if (input.untracked === undefined) {
+  phase('Prepare')
+  const { value: launch, error } = await runCopy(PREPARE_SECTIONS, 'the untracked and dirty paths the review starts from', 'prepare', 'Prepare', PREPARE_OPTS)
+  if (!launch) throw new Error(`the launch state could not be read: ${error}`)
+  untrackedInScope = new Set(launch.untracked)
+  protectedFiles = new Set(launch.dirty)
+}
+
 phase('Find')
-log(`scope ${input.scope}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, ${DIMENSIONS.length} finder dimension(s), ${input.dirtyAtLaunch.length ? `${input.dirtyAtLaunch.length} path(s) dirty at launch` : 'tree clean at launch'}, implementers on ${IMPLEMENTER_MODEL || 'the session model'}`)
+log(`scope ${input.scope}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, ${DIMENSIONS.length} finder dimension(s), ${protectedFiles.size ? `${protectedFiles.size} path(s) dirty at launch` : 'tree clean at launch'}, implementers on ${IMPLEMENTER_MODEL || 'the session model'}`)
 
 await parallel(DIMENSIONS.map((d) => async () => {
   const res = await run(finderPrompt(d), { label: `find: ${d.key}`, phase: 'Find', schema: FINDINGS_SCHEMA, ...FINDER_OPTS })

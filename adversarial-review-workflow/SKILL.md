@@ -19,12 +19,9 @@ A Workflow reviews the scoped code: one finder per dimension, two skeptics per f
 
    Every diff-bounded scope is the working tree against the base, `git diff <BASE>`, plus untracked files.
 
-2. **Record the launch state**, via Bash from the project root:
-   - `root`: the absolute project root.
-   - `dirtyAtLaunch`: every path `git status --porcelain` lists, modified and untracked alike, as plain paths. Pass `[]` for a clean tree.
-   - `untracked`: `git ls-files -o --exclude-standard`. Pass `[]` when there are none.
+2. **Record `root`**, the absolute project root. The workflow lists the untracked and dirty paths itself.
 
-3. **Scout the shape of the scope**, not its content: `git diff --stat <BASE>` plus the untracked paths, or for `codebase` the tracked file list with line counts. If the scope is empty, report that there is nothing to review and stop without launching.
+3. **Scout the shape of the scope**, not its content: `git diff --stat <BASE>` plus the untracked paths (`git -c core.quotePath=false ls-files -o --exclude-standard`), or for `codebase` the tracked file list with line counts. If the scope is empty, report that there is nothing to review and stop without launching.
 
    From those paths and sizes, design the `dimensions`: one finder per dimension, each `{key, title, focus, files}`. A dimension is a slice a single reviewer can hold in context and attack from one angle (a subsystem, a layer, a cross-cutting concern such as authorization or i18n and docs, tests and CI). Every changed or untracked file belongs to at least one dimension; a file may appear in several when two angles both need it. `focus` is a paragraph naming the specific things to attack in those files: the mechanisms the diff introduced, the invariants it could break, the callers that depend on it. Write it from the file names and stat sizes plus what you know of the repository; the finders read the hunks themselves. Past runs used five to nine dimensions for branches of forty to a hundred changed files; a small diff may need two.
 
@@ -39,11 +36,11 @@ A Workflow reviews the scoped code: one finder per dimension, two skeptics per f
    ```
    Workflow({
      scriptPath: "<absolute path to review.mjs>",
-     args: { scope: "<scope>", root: "<absolute project root>", base: "<commit, omitted for codebase>", dirtyAtLaunch: [<paths>], untracked: [<paths>], dimensions: [{ key, title, focus, files: [<paths>] }, ...], context: "<project description>", authorEnd: "<HEAD at launch, omitted for codebase>", intent: "<the user's note, omitted when none>", checks: "<check commands, omitted when none found>", implementerModel: "<model argument, omitted when not given>" }
+     args: { scope: "<scope>", root: "<absolute project root>", base: "<commit, omitted for codebase>", dimensions: [{ key, title, focus, files: [<paths>] }, ...], context: "<project description>", authorEnd: "<HEAD at launch, omitted for codebase>", intent: "<the user's note, omitted when none>", checks: "<check commands, omitted when none found>", implementerModel: "<model argument, omitted when not given>" }
    })
    ```
 
-   Pass `dirtyAtLaunch`, `untracked`, `dimensions` and each `files` as real JSON arrays, not JSON-encoded strings. The script validates the args and throws on a missing one.
+   Pass `dimensions` and each `files` as real JSON arrays, not JSON-encoded strings. The script validates the args and throws on a missing one.
 
    **If the run dies** (a session limit, a killed task), never resume it with `resumeFromRunId`, whatever the harness suggests; relaunch it by [RELAUNCH.md](RELAUNCH.md) in this skill's folder.
 
