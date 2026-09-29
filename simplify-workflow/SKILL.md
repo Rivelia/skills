@@ -21,9 +21,7 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
    - `unpushed`: `git merge-base HEAD @{upstream}`. If the branch has no upstream (`git rev-parse @{upstream}` fails), ask the user which remote ref bounds the unpushed work and stop.
    - `codebase`: none; omitted from the args.
 
-3. **Say what is source.** The workflow lists the files itself: the scope's changed and untracked files (every tracked file for `codebase`), minus what `excludePattern` matches, as the files to simplify; and, of those with one of the `pruneExts`, the ones whose diff adds a comment (any comment, whole files for untracked ones and for `codebase`) as the prune candidates. It returns `skipped: "nothing-to-simplify"` when no file is left.
-
-   Set `pruneExts` to the comment-carrying source extensions of this repo, e.g. `[".ts", ".js", ".svelte"]`, the set for the repo rather than the extensions that happen to appear in the diff; files that appear mid-run are judged by it too. Optionally set `excludePattern`, an extended regex with no single quote, when the default would let a build output directory, generated code or a vendored tree of this repo into the scope; it replaces the default rather than adding to it. For `codebase`, check the top-level directories and any `linguist-generated` or `linguist-vendored` entries in `.gitattributes` before trusting the default. The default:
+3. **Say what is source**; the workflow lists the files itself. Set `pruneExts` to the comment-carrying source extensions of this repo, e.g. `[".ts", ".js", ".svelte"]`, the set for the repo rather than the extensions that happen to appear in the diff; files that appear mid-run are judged by it too. Optionally set `excludePattern`, an extended regex with no single quote, when the default would let a build output directory, generated code or a vendored tree of this repo into the scope; it replaces the default rather than adding to it. For `codebase`, check the top-level directories and any `linguist-generated` or `linguist-vendored` entries in `.gitattributes` before trusting the default. The default:
 
    ```
    (^|/)(node_modules|vendor|third_party|dist|build|target|generated)/|\.min\.|(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|go\.sum)$|\.(json|jsonl|csv|tsv|md|mdx|lock|snap|svg|png|jpe?g|gif|ico|webp|pdf|woff2?|ttf|otf|eot|zip|gz|wasm|so|dylib|dll|exe|bin)$
@@ -40,8 +38,8 @@ A Workflow converges the scoped code to a stable simplified form. Each round run
    })
    ```
 
-   Pass `pruneExts` as a real JSON array, not a JSON-encoded string. The script also accepts an optional `applyModel`, a model for the appliers only, which otherwise inherit the session's model; the appliers run at medium effort either way; the merge-ready workflow passes it, this skill never does.
+   Pass `pruneExts` as a real JSON array, not a JSON-encoded string.
 
-   **If the run dies** (a session limit, a killed task), never resume it with `resumeFromRunId`, whatever the harness suggests: the judges and appliers start in the order the finders finish, so the cache misses partway through and the rest re-run live against a tree that already holds the edits. Relaunch from step 1 instead; the workflow recomputes every list from the current tree.
+   **If the run dies** (a session limit, a killed task), never resume it with `resumeFromRunId`, whatever the harness suggests; relaunch from step 1, and the workflow recomputes every list from the current tree.
 
 6. **Report** the result by [REPORT.md](REPORT.md) in this skill's folder. Leave the changes uncommitted.

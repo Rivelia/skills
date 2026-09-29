@@ -389,25 +389,17 @@ Confirmed findings:
 ${confirmed.map((e) => `Finding #${e.id} [${e.finalSeverity}] ${e.finalTitle ?? e.title}\nLocation: ${e.file}:${e.line}\nDescription: ${e.finalDescription ?? e.description}`).join('\n\n')}`
 }
 
-// Files an implementer must never sweep into a commit or restore with git:
-// the user's uncommitted work at launch, plus fixes earlier in this run that
-// had to stay uncommitted because they overlapped that work.
+// Files never swept into a commit or restored with git: the user's uncommitted
+// work at launch, plus fixes earlier in this run that had to stay uncommitted
+// because they overlapped that work.
 const protectedFiles = new Set(input.dirtyAtLaunch)
 const uncommittedFixFiles = new Set()
 const priorFixes = []
 
-function protectedText() {
-  const user = input.dirtyAtLaunch
-  const fixes = [...uncommittedFixFiles]
-  if (user.length === 0 && fixes.length === 0) {
-    return 'The working tree was clean at launch and every fix accepted so far in this run is committed, so the tree is clean when you start (check with `git status --porcelain`).'
-  }
-  const lines = []
-  if (user.length) lines.push(`These paths held the user's uncommitted work at launch and must keep it:\n${user.map((f) => `- ${f}`).join('\n')}`)
-  if (fixes.length) lines.push(`These paths hold fixes from earlier in this run that were left uncommitted:\n${fixes.map((f) => `- ${f}`).join('\n')}`)
-  lines.push('Treat every path listed above as PROTECTED: never run git checkout, restore, stash, reset or clean on it, never stage it, and undo your own hunks in it by editing the file back by hand. Everything else in the tree is committed.')
-  return lines.join('\n')
-}
+// Every fix is either committed or left in a protected file, so the paths
+// `git status` lists when an implementer starts are exactly the protected ones,
+// and no prompt carries the list: for an uncommitted scope it is every file.
+const PROTECTED_TEXT = 'Before you edit anything, run `git status --porcelain`: every path it lists is PROTECTED, holding the user\'s uncommitted work at launch or a fix from earlier in this run that had to stay uncommitted. Everything else in the tree is committed. Never run git checkout, restore, stash, reset or clean on a protected path, never stage it, and undo your own hunks in it by editing the file back by hand.'
 
 function checksText() {
   if (CHECKS) {
@@ -425,7 +417,7 @@ function implementerPrompt(e, siblings) {
 
 You are the IMPLEMENTER for one confirmed finding. You may edit files under ${ROOT}. Nobody reviews your change after you: you are the last line. Judge your own diff the way the maintainer reviewing the merge request would; they send back anything bigger than the finding.
 
-${protectedText()}
+${PROTECTED_TEXT}
 
 ${findingText(e)}
 ${sibText}

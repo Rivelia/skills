@@ -2,7 +2,7 @@ export const meta = {
   name: 'simplify-converge',
   description: 'Loop simplification rounds (find, judge, apply) over a scope until fresh finders come up empty, then prune non-useful comments once converged',
   phases: [
-    { title: 'Prepare', detail: 'Sonnet runs the commands listing the scope, the prune candidates and the untracked files, and hashes the tree', model: 'sonnet' },
+    { title: 'Prepare', detail: 'Sonnet runs the commands listing the scope, the untracked files and the source files with no comment in scope, and hashes the tree', model: 'sonnet' },
     { title: 'Find', detail: 'read-only agents propose simplifications per batch', model: 'opus' },
     { title: 'Judge', detail: 'independent gatekeepers strike proposals that are not genuine improvements', model: 'opus' },
     { title: 'Apply', detail: 'implement the approved findings per batch' },
@@ -100,15 +100,16 @@ function prepareSections() {
   const extRe = `\\.(${PRUNE_EXTS.map((e) => e.slice(1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`
   return [
     { name: 'files', kind: 'list', cmd: `{ ${LIST_TRACKED_CMD}; ${GIT} ls-files -o --exclude-standard; } | sort -u | grep -vE '${EXCLUDE}' | while IFS= read -r f; do [ -f "$f" ] && echo "$f"; done || :` },
-    {
-      name: 'pruneFiles',
-      kind: 'list',
-      cmd: SCOPE === 'codebase'
-        ? `${GIT} ls-files | sort -u | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && grep -qE '(//|/\\*|<!--)' "$f" && echo "$f"; done || :`
-        : `${GIT} diff --name-only ${BASE} | sort -u | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && ${GIT} diff ${BASE} -- "$f" | grep -qE '^\\+.*(//|/\\*|<!--)' && echo "$f"; done || :`,
-    },
-    { name: 'pruneUntrackedFiles', kind: 'list', cmd: `${GIT} ls-files -o --exclude-standard | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && grep -qE '(//|/\\*|<!--)' "$f" && echo "$f"; done || :` },
     { name: 'untrackedBaseline', kind: 'list', cmd: `${GIT} ls-files -o --exclude-standard` },
+    // The complement of the prune candidates among the source files: most
+    // source files carry a comment, so in a codebase scope this list is far
+    // shorter than the candidates it stands for, and the copy agents copy it
+    // instead.
+    {
+      name: 'noCommentFiles',
+      kind: 'list',
+      cmd: `{ ${LIST_TRACKED_CMD} | sort -u | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && ! ${SCOPE === 'codebase' ? `grep -qE '(//|/\\*|<!--)' "$f"` : `${GIT} diff ${BASE} -- "$f" | grep -qE '^\\+.*(//|/\\*|<!--)'`} && echo "$f"; done; ${GIT} ls-files -o --exclude-standard | grep -vE '${EXCLUDE}' | grep -E '${extRe}' | while IFS= read -r f; do [ -f "$f" ] && ! grep -qE '(//|/\\*|<!--)' "$f" && echo "$f"; done; } || :`,
+    },
     { name: 'baselineHash', kind: 'hash', cmd: hashCommand() },
   ]
 }
@@ -317,6 +318,14 @@ if (prep.files.length === 0) {
   return { skipped: 'nothing-to-simplify', error: null }
 }
 const HASH_CMD = hashCommand()
+// The prune candidates: the source files in scope whose diff adds a comment
+// (whole files for untracked ones and for codebase), split by whether they
+// were untracked at launch.
+const untrackedAtLaunch = new Set(prep.untrackedBaseline)
+const noComment = new Set(prep.noCommentFiles)
+const pruneable = prep.files.filter((f) => PRUNE_EXTS.some((e) => f.endsWith(e)) && !noComment.has(f))
+const trackedPruneFiles = pruneable.filter((f) => !untrackedAtLaunch.has(f))
+const untrackedPruneFiles = pruneable.filter((f) => untrackedAtLaunch.has(f))
 
 const BATCH_SIZE = 15
 const MAX_ROUNDS = 100
@@ -753,7 +762,7 @@ const scopeNote =
 
 // A file that did not exist at the base has an empty diff against it, so the
 // diff-bounded note on its own tells the finder that nothing in it is in scope.
-const wholeFile = new Set(prep.untrackedBaseline)
+const wholeFile = new Set(untrackedAtLaunch)
 
 function batchScopeNote(files) {
   if (input.scope === 'codebase') return ''
@@ -1094,8 +1103,6 @@ if (stopReason === 'converged') {
     const i = base.lastIndexOf('.')
     return i > 0 ? base.slice(i) : ''
   }
-  const trackedPruneFiles = prep.pruneFiles
-  const untrackedPruneFiles = prep.pruneUntrackedFiles
   const alreadyListed = new Set([...trackedPruneFiles, ...untrackedPruneFiles])
   const pruneExts = new Set(PRUNE_EXTS)
   const createdPruneFiles = filesCreatedDuringRun.filter(f => pruneExts.has(extOf(f)) && !alreadyListed.has(f))
