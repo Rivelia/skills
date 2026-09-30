@@ -12,7 +12,7 @@ A Workflow runs find, judge, apply rounds over batches of the scoped files until
 1. **Resolve the arguments.** Parse them in this exact order; every "ask the user" below means ask and stop, without launching anything.
    - The first argument is the scope and must be exactly one of `uncommitted`, `branch`, `unpushed`, `codebase`; if it is missing or anything else, ask the user which scope to use.
    - After the scope, what remains must be nothing, `[model]`, or `[model] [effort]`, in that order and nothing else.
-   - The model must be a plausible model name (e.g. `opus`, `sonnet`, `haiku`). If the token after the scope is not a model name, ask the user what they meant. An effort is one of `low`, `medium`, `high`, `xhigh`, `max`. If a model is given without a following effort, ask the user which effort to use; the model/effort pairing is the user's call, never defaulted. The override drives the find, apply and prune agents; the judge and the verify agents keep their fixed models (Opus for the judge and the fix-up, Sonnet for the check runs).
+   - The model must be a plausible model name (e.g. `opus`, `sonnet`, `haiku`). If the token after the scope is not a model name, ask the user what they meant. An effort is one of `low`, `medium`, `high`, `xhigh`, `max`. If a model is given without a following effort, ask the user which effort to use; the model/effort pairing is the user's call, never defaulted. The override drives the find, apply and prune agents; the judge and the verify agents keep their fixed models (Sonnet at high effort for the judge, Opus for the fix-up, Sonnet for the check runs).
    - Any further leftover argument: ask the user what it means.
 
 2. **Resolve `base`**, the commit bounding the diff:

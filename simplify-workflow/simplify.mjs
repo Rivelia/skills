@@ -4,7 +4,7 @@ export const meta = {
   phases: [
     { title: 'Prepare', detail: 'Sonnet runs the commands listing the scope, the untracked files and the source files with no comment in scope, and hashes the tree', model: 'sonnet' },
     { title: 'Find', detail: 'read-only agents propose simplifications per batch', model: 'opus' },
-    { title: 'Judge', detail: 'independent gatekeepers strike proposals that are not genuine improvements', model: 'opus' },
+    { title: 'Judge', detail: 'independent gatekeepers strike proposals that are not genuine improvements', model: 'sonnet' },
     { title: 'Apply', detail: 'implement the approved findings per batch' },
     { title: 'Hash', detail: 'deterministic tree hash after each round an applier ran in, and each prune pass', model: 'sonnet' },
     { title: 'Discover', detail: 'list untracked files the appliers did not declare', model: 'sonnet' },
@@ -337,7 +337,8 @@ const override = input.model ? { model: input.model, effort: input.effort } : nu
 const simplifyOpts = override ?? { model: 'opus', effort: 'medium' }
 const applyOpts = override ?? { ...(input.applyModel ? { model: input.applyModel.trim() } : {}), effort: 'medium' }
 const pruneOpts = override ?? { model: 'opus', effort: 'medium' }
-const judgeOpts = { model: 'opus', effort: 'high' }
+const judgeOpts = { model: 'sonnet', effort: 'high' }
+const fixOpts = { model: 'opus', effort: 'high' }
 const checkOpts = { model: 'sonnet', effort: 'low' }
 
 const GROUPS = ['Performance improvements', 'Code simplifications', 'Bug fixes']
@@ -698,7 +699,7 @@ ${rootedCmd(input.checkCmd)}
 An automated ${cause} run has just edited this project${touchedNote}. If the command passes, report passed=true with empty \`fixed\` and \`remaining\`. If it fails, fix the failures the run caused${traceNote}, then re-run the command, repeating until it passes or you have made three rounds of fixes. Keep every fix minimal and behavior-preserving; do not refactor or simplify beyond what the repair requires.${baselineNote}${carriedNote}${touchedSection}
 
 Report \`passed\` for the final state, one line per repair in \`fixed\`, and any run-caused failures still present in \`remaining\` (file paths relative to the project root, no leading './', never absolute).`,
-      { label, phase: 'Verify', schema: FIX_SCHEMA, ...judgeOpts },
+      { label, phase: 'Verify', schema: FIX_SCHEMA, ...fixOpts },
     )
   } catch {
     return null
