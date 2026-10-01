@@ -6,7 +6,7 @@ Skills for Claude Code.
 
 | Skill | What it does |
 | --- | --- |
-| `merge-ready-workflow` | Takes a scope (uncommitted, branch, unpushed, codebase) to a mergeable state: adversarial review rounds with fresh finders until a round fixes too little to justify another, then the simplify workflow over the same scope. Needs `adversarial-review-workflow` and `simplify-workflow`. |
+| `merge-ready-workflow` | Takes a scope (uncommitted, branch, unpushed, codebase) to a mergeable state: adversarial review rounds with fresh finders until a round fixes too little to justify another, then the simplify workflow over the same scope, whose changes it commits. Needs `adversarial-review-workflow` and `simplify-workflow`. |
 | `adversarial-review-workflow` | One adversarial review over a scope: finders per dimension, two skeptics per finding, auto-fixes when the smallest fix fits the severity. |
 | `simplify-workflow` | Simplification rounds (find, judge, apply) over a scope until fresh finders come up empty, then prunes non-useful comments. |
 | `changelogs-to-patch-notes` | Turns the git log since a version or commit, plus CHANGELOG.md, into user-facing patch notes. |

@@ -7,6 +7,7 @@ export const meta = {
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
     { title: 'Triage', detail: 'Opus classifies each fixed medium-or-higher finding by the kinds of change in its hunks; a production kind means another round; runs beside the next round when the finders already justify one, beside the next scout otherwise', model: 'opus' },
     { title: 'Simplify', detail: 'the simplify-converge workflow (simplify.mjs) over the same scope, which computes its own file lists' },
+    { title: 'Commit', detail: 'Sonnet commits what simplify left in the tree, leaving the user\'s uncommitted work, uncommitted review fixes and any simplify change sharing a file with them', model: 'sonnet' },
   ],
 }
 
@@ -168,6 +169,17 @@ const TRIAGE_SCHEMA = {
   required: ['verdicts'],
 }
 
+const COMMIT_SCHEMA = {
+  type: 'object',
+  properties: {
+    committed: { type: 'boolean' },
+    commitSha: { type: ['string', 'null'] },
+    files: { type: 'array', items: { type: 'string' }, description: 'Exactly the paths the commit holds; empty when nothing was committed.' },
+    reason: { type: 'string', description: 'When nothing was committed, why in one sentence; empty otherwise.' },
+  },
+  required: ['committed', 'commitSha', 'files', 'reason'],
+}
+
 // ---------- prompts ----------
 
 // The scout reads the author's commit messages the way the review's agents
@@ -273,6 +285,26 @@ const PREPARE_SECTIONS = [
   { name: 'untracked', cmd: `${GIT} ls-files -o --exclude-standard` },
   { name: 'dirty', cmd: `{ ${GIT} diff --name-only --no-renames HEAD; ${GIT} ls-files -o --exclude-standard; } || :` },
 ]
+
+// Simplify leaves its edits in the tree. Nothing else writes to it after the
+// last round, so whatever is dirty there and outside the held paths is
+// simplify's own, and goes into one commit like a review fix would.
+const COMMIT_OPTS = { model: 'sonnet', effort: 'low' }
+
+function commitPrompt(held, summary) {
+  const changes = Object.entries(summary || {})
+    .flatMap(([group, list]) => list.map((c) => `- ${group}: ${c.description}`))
+  return `${CONTEXT}
+
+The simplify workflow has just edited this repository and left its changes uncommitted. Commit them.
+
+Run \`${GIT} -C ${shellQuote(ROOT)} status --porcelain --untracked-files=all\`. ${held.length
+    ? `These paths are HELD: the user's uncommitted work at launch, a review fix that had to stay uncommitted, or a simplify change sharing a file with one of those. Never stage, commit, checkout, restore, stash or otherwise touch them:\n${held.map((p) => `- ${p}`).join('\n')}\n\nEvery other path the status lists`
+    : 'Every path it lists'} is simplify's: stage exactly those paths with \`git add -A -- <paths>\` (so a deletion is staged too), and nothing else. Then \`git commit\` with a message in the project's commit convention (from the context above; default \`type(scope): subject\`), with no attribution lines or trailers. The subject says the code was simplified; the body may list the changes:
+${changes.length ? changes.join('\n') : '- (no change was recorded; comments may have been pruned or check failures repaired)'}
+
+Report committed=true, the sha and exactly the committed paths. When no path outside the held ones is dirty, commit nothing and report committed=false with the reason. Finish with \`git status --porcelain\` and make sure no path of the commit remains dirty.`
+}
 
 const COPY_SCHEMA = {
   type: 'object',
@@ -712,6 +744,35 @@ if (stopReason !== 'converged') {
   }
 }
 
+// A simplify change touching a held file stays out of the commit, and so does
+// every file it touched, since committing one half of a change would break the
+// commit; a change sharing a file with it then stays out too, to a fixed point.
+let simplifyCommit = null
+if (simplify.ran) {
+  phase('Commit')
+  const protectedPaths = new Set([...launch.dirty, ...allUncommittedFixFiles, ...allPossiblyDirty])
+  const held = new Set(protectedPaths)
+  const changes = Object.values(simplify.result.summary || {}).flat()
+  for (let grew = true; grew;) {
+    grew = false
+    for (const c of changes) {
+      const files = c.files || []
+      if (!files.some((f) => held.has(f)) || files.every((f) => held.has(f))) continue
+      for (const f of files) held.add(f)
+      grew = true
+    }
+  }
+  const heldList = [...held].sort()
+  const c = await run(commitPrompt(heldList, simplify.result.summary), { label: 'commit simplify', phase: 'Commit', schema: COMMIT_SCHEMA, ...COMMIT_OPTS })
+  const keptOut = heldList.filter((f) => !protectedPaths.has(f))
+  simplifyCommit = c
+    ? { committed: c.committed === true, commitSha: c.committed ? c.commitSha : null, files: c.files || [], reason: c.reason || null, keptOut }
+    : { committed: false, commitSha: null, files: [], reason: 'the commit agent died', keptOut }
+  log(simplifyCommit.committed
+    ? `simplify committed as ${simplifyCommit.commitSha} (${simplifyCommit.files.length} file(s))`
+    : `simplify left uncommitted: ${simplifyCommit.reason}`)
+}
+
 // A discarded scout only reads, so it may finish beside the simplify phase.
 await Promise.all([...backgroundTriages, nextScout])
 
@@ -727,4 +788,5 @@ return {
   uncommittedFixFiles: [...allUncommittedFixFiles],
   possiblyDirty: [...allPossiblyDirty],
   simplify,
+  simplifyCommit,
 }
