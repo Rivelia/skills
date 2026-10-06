@@ -86,7 +86,7 @@ const CLUSTER_OPTS = { model: 'opus', effort: 'medium' }
 const SIBLING_OPTS = { model: 'opus', effort: 'high' }
 const CLEANUP_OPTS = { model: 'sonnet', effort: 'low' }
 // The skeptics run once per finding, so they run on Sonnet; what they settle
-// (severity, corrected wording) reaches the report only, never the clustering,
+// (the severity) reaches the report only, never the clustering,
 // the sibling check or the implementer. Both run at high effort except on a
 // nit, taken as the higher of the finder's and the settled severity so that a
 // downgrade never lowers the technical skeptic's effort.
@@ -171,8 +171,20 @@ const EXCLUSIONS = {
 const EXCLUSION_KEYS = Object.keys(EXCLUSIONS)
 const EXCLUDED = `Never auto-applied; report the key as excludedKind:\n${EXCLUSION_KEYS.map((k) => `- ${k}: ${EXCLUSIONS[k]}`).join('\n')}`
 
+// The only grounds on which the materiality skeptic refutes a finding, each with
+// the key it reports. A codebase review has no base for a finding to predate.
+const REFUTE_GROUNDS = {
+  'style-preference': 'a style preference no quotable rule states',
+  ...(input.scope === 'codebase' ? {} : { 'pre-existing': `a pre-existing condition the diff neither introduced nor worsened (check with \`git diff ${BASE} -- <file>\` and \`git show ${BASE}:<file>\`); but ${INCOMPLETE_FIX}` }),
+  'documented-tradeoff': 'a documented tradeoff that covers this specific regression (an ADR or doc accepting a related fallback does not excuse a new gap in a component that does implement the mechanism)',
+  'intended-removal': "a removal the author's intent states, as a named item or as the general rule the commit applies, when the finding names no surviving code path, user or doc that depends on the deleted thing; a commit made by an earlier round of this review shows none of the author's decisions",
+  'unprompted-behaviour': `a deleted prompt or tool-description instruction that restates behaviour a current model shows unprompted (${UNPROMPTED_BEHAVIOUR}); the loss is real only for a contract the model cannot infer (${NON_INFERABLE_CONTRACT})`,
+  'hollow-test': `a deleted test that could not fail on a plausible regression: one that ${HOLLOW_TEST}`,
+}
+const REFUTE_GROUND_KEYS = Object.keys(REFUTE_GROUNDS)
+
 // Every agent reads the finding as the finder wrote it: the skeptics' severity
-// and corrections are for the report. The skeptics and the sibling check judge
+// is for the report. The skeptics and the sibling check judge
 // the defect, not how to fix it, so they get it without the suggested fix.
 function findingText(e, withFix = true) {
   return `Finding #${e.id} [${e.severity}] ${e.title}\nLocation: ${e.file}:${e.line}\nDescription: ${e.description}\nEvidence: ${e.evidence}${withFix ? `\nSuggested fix: ${e.suggestedFix}` : ''}`
@@ -222,21 +234,20 @@ const MATERIALITY_SCHEMA = {
   type: 'object',
   properties: {
     verdict: { type: 'string', enum: ['refute', 'downgrade', 'upgrade', 'confirm'] },
+    ground: { type: 'string', enum: [...REFUTE_GROUND_KEYS, 'none'], description: 'For refute: the key of the ground it rests on. none for any other verdict.' },
     severity: { type: 'string', enum: SEVERITIES, description: 'The severity you settle on: for downgrade or upgrade the new one, for confirm the finding\'s.' },
     reason: { type: 'string' },
   },
-  required: ['verdict', 'severity', 'reason'],
+  required: ['verdict', 'ground', 'severity', 'reason'],
 }
 
 const TECHNICAL_SCHEMA = {
   type: 'object',
   properties: {
-    verdict: { type: 'string', enum: ['refute', 'confirm_as_is', 'confirm_corrected'] },
-    correctedTitle: { type: ['string', 'null'] },
-    correctedDescription: { type: ['string', 'null'], description: 'For confirm_corrected: the defect as you actually verified it, at the same location.' },
+    verdict: { type: 'string', enum: ['refute', 'confirm'] },
     reason: { type: 'string', description: 'What you verified and how (code read, commands run).' },
   },
-  required: ['verdict', 'correctedTitle', 'correctedDescription', 'reason'],
+  required: ['verdict', 'reason'],
 }
 
 const CLUSTER_SCHEMA = {
@@ -352,9 +363,6 @@ Answer with the id of the registered finding it duplicates, or null.`
 }
 
 function materialityPrompt(e) {
-  const preExisting = input.scope === 'codebase'
-    ? ''
-    : `; a pre-existing condition the diff neither introduced nor worsened (check with \`git diff ${BASE} -- <file>\` and \`git show ${BASE}:<file>\`); but ${INCOMPLETE_FIX}`
   return `${CONTEXT}
 
 ${READ_ONLY}
@@ -364,14 +372,10 @@ You are the MATERIALITY skeptic in an adversarial code review. Your job is to at
 ${findingText(e, false)}
 
 Your verdict is four-way:
-- refute: the finding's substance fails. Valid grounds, and no others:
-  - a style preference no quotable rule states${preExisting};
-  - a documented tradeoff that covers this specific regression (an ADR or doc accepting a related fallback does not excuse a new gap in a component that does implement the mechanism);
-  - a removal the author's intent states, as a named item or as the general rule the commit applies, when the finding names no surviving code path, user or doc that depends on the deleted thing; a commit made by an earlier round of this review shows none of the author's decisions;
-  - a deleted prompt or tool-description instruction that restates behaviour a current model shows unprompted (${UNPROMPTED_BEHAVIOUR}); the loss is real only for a contract the model cannot infer (${NON_INFERABLE_CONTRACT});
-  - a deleted test that could not fail on a plausible regression: one that ${HOLLOW_TEST}.
+- refute: the finding's substance fails. Valid grounds, and no others; report the key as ground:
+${REFUTE_GROUND_KEYS.map((k) => `  - ${k}: ${REFUTE_GROUNDS[k]}`).join(';\n')}.
   A change lying outside its commit's stated scope is not a ground to confirm; judge it by what it breaks.
-- downgrade: the mechanism is real but the impact is overstated. Severity inflation alone is not a kill ground: downgrade and confirm. Say the severity you settle on. A downgrade because the path is rare, the configuration unlikely or the input unusual quotes the config, seed data, docs or callers that show it; without that evidence, keep the finding's severity.
+- downgrade: the mechanism is real but the impact is overstated. Severity inflation alone is not a kill ground: downgrade and confirm. Say the severity you settle on. The scale already counts rarity: medium is wrong behaviour on an edge path or a race that is hard to hit. So a rare path, an unlikely configuration or an unusual input takes a finding down to medium at most, and only when you quote the config, seed data, docs or callers that show it; without that evidence, keep the finding's severity. A finding goes below medium only when its consequence itself is one the scale rates low or nit.
 - upgrade: the mechanism is as described and its consequence sits in a higher tier of the severity scale than the finding claims. Quote the code, config or callers that place it there, and say the severity you settle on.
 - confirm: the finding is material at its stated severity.
 
@@ -388,16 +392,15 @@ function technicalPrompt(e) {
 
 ${READ_ONLY}
 
-You are the TECHNICAL skeptic in an adversarial code review. Your job is to attack whether this finding is technically true, refuting by default when uncertain whether the failure mechanism is real at all. A materiality skeptic already confirmed it matters.
+You are the TECHNICAL skeptic in an adversarial code review. Your job is to attack whether this finding is technically true, refuting by default when uncertain whether the failure mechanism is real at all. A materiality skeptic already confirmed it matters, and that judgement is not yours to redo: whether the impact is worth a fix, what the author intended, how a project rule or convention reads, and whether the condition predates the diff are never grounds to refute here.
 
 ${findingText(e, false)}
 
-Verify it yourself: read the code at the location and along the path the finding names, read library sources when the claim depends on their behaviour, and run a small experiment from /tmp or an existing test when that settles it. Do not take the finder's evidence on trust. Try to construct the concrete input or sequence; if it cannot happen, refute.
+Verify it yourself: read the code at the location and along the path the finding names, read library sources when the claim depends on their behaviour, and run a small experiment from /tmp or an existing test when that settles it. Do not take the finder's evidence on trust. Try to construct the concrete input or sequence; if it cannot happen, refute. An experiment counts only when it ran under the conditions the finding names (its runtime, version, platform, configuration or timing); one that could not reproduce them is no evidence either way, and the code decides.
 
-Your verdict is three-way:
+Your verdict is two-way:
 - refute: the mechanism does not exist, or the code already handles it, or the trigger cannot occur. Uncertainty about whether the mechanism is real at all defaults to refute.
-- confirm_corrected: a detail in the finding is wrong (bad arithmetic, misattributed cause, overstated scenario) but your own verification shows the underlying defect is real in a corrected form at the same location. Give the corrected description; the report carries it. A correction must be something you actually verified, not a charitable reinterpretation.
-- confirm_as_is: the finding is right as written.
+- confirm: the defect is real at the location the finding names, even when a detail of it is wrong (bad arithmetic, misattributed cause, overstated scenario).
 
 A wrong detail is only a kill ground when the failure mechanism collapses with it. Quote the code your verdict rests on.`
 }
@@ -717,6 +720,7 @@ async function verify(e) {
   if (mat.verdict === 'refute') {
     e.status = 'refuted'
     e.refutedBy = 'materiality'
+    e.refuteGround = REFUTE_GROUND_KEYS.includes(mat.ground) ? mat.ground : null
     e.refuteReason = mat.reason
     log(`#${e.id} refuted on materiality`)
     return
@@ -735,11 +739,6 @@ async function verify(e) {
     e.refuteReason = tech.reason
     log(`#${e.id} refuted on technical truth`)
     return
-  }
-  if (tech.verdict === 'confirm_corrected') {
-    if (tech.correctedDescription) e.finalDescription = tech.correctedDescription
-    if (tech.correctedTitle) e.finalTitle = tech.correctedTitle
-    e.corrected = true
   }
   e.status = 'confirmed'
   log(`#${e.id} confirmed at ${e.finalSeverity}`)
@@ -771,8 +770,6 @@ function registerAndVerify(f, dim) {
       alsoReportedBy: [],
       status: 'pending',
       finalSeverity: null,
-      finalTitle: null,
-      finalDescription: null,
     }
     registry.push(entry)
     log(`registered #${entry.id} [${entry.severity}] ${entry.title} (${dim})`)
@@ -932,19 +929,22 @@ function firstSentence(text) {
 function reported(e) {
   const f = {
     id: e.id,
-    title: e.finalTitle ?? e.title,
+    title: e.title,
     file: e.file,
     line: e.line,
     severity: e.finalSeverity ?? e.severity,
     status: e.status,
   }
   // A refuted finding is reported by its title and the skeptic's reason, a
-  // fixed or covered one by its title and the fix.
-  if (e.status !== 'refuted' && e.outcome !== 'fixed' && e.outcome !== 'covered') f.description = e.finalDescription ?? e.description
+  // fixed or covered one by its title and the fix. A high or critical one
+  // refuted as pre-existing is still a defect someone must fix outside this
+  // diff, so the report hands it on with its description.
+  const handedOn = e.refuteGround === 'pre-existing' && (e.severity === 'high' || e.severity === 'critical')
+  if ((e.status !== 'refuted' || handedOn) && e.outcome !== 'fixed' && e.outcome !== 'covered') f.description = e.description
   if (LOOP_FIELDS) f.dimension = e.dimension
-  if (e.corrected) f.corrected = true
   if (e.alsoReportedBy.length) f.alsoReportedBy = e.alsoReportedBy
   if (e.status === 'refuted') Object.assign(f, { refutedBy: e.refutedBy, refuteReason: firstSentence(e.refuteReason) })
+  if (e.refuteGround) f.refuteGround = e.refuteGround
   if (e.failedAt) f.failedAt = e.failedAt
   if (!e.outcome) return f
   f.outcome = e.outcome
