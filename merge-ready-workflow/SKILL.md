@@ -1,6 +1,6 @@
 ---
 name: merge-ready-workflow
-description: Repeats adversarial code review over a scope (uncommitted | branch | unpushed | codebase) until a round fixes too little to justify another, then runs a simplify workflow over the same scope. Use only when the user explicitely asks.
+description: Repeats adversarial code review over a scope (uncommitted | branch | unpushed | codebase) until a round fixes too little to justify another, then runs a simplify workflow over the same scope. Use only when the user explicitly asks.
 argument-hint: "<uncommitted|branch|unpushed|codebase> [model]"
 ---
 
