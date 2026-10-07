@@ -1,8 +1,7 @@
 ---
 name: merge-ready-workflow
-description: Repeats the adversarial code review over a scope (uncommitted | branch | unpushed | codebase), re-scouting the finders every round, until a round fixes too little to justify another, then runs the simplify workflow over the same scope.
+description: Repeats adversarial code review over a scope (uncommitted | branch | unpushed | codebase) until a round fixes too little to justify another, then runs a simplify workflow over the same scope. Use only when the user explicitely asks.
 argument-hint: "<uncommitted|branch|unpushed|codebase> [model]"
-disable-model-invocation: true
 ---
 
 One Workflow runs adversarial review rounds, each with freshly scouted finder dimensions, until a round fixes too little to justify another, then the simplify workflow. The mechanics live in [merge-ready.mjs](merge-ready.mjs), and running it needs nothing from inside it; it launches the sibling skills' [review.mjs](../adversarial-review-workflow/review.mjs) and [simplify.mjs](../simplify-workflow/simplify.mjs), so both must be installed. You resolve the scope, describe the project, launch and report.
