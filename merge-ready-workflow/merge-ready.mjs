@@ -2,7 +2,7 @@ export const meta = {
   name: 'merge-ready',
   description: 'Repeat the adversarial code review over a scope, re-scouting the finders each round, until a round fixes nothing medium or higher that changes production behaviour and fewer than half its finders reported a medium-or-higher fix; then simplify the same scope',
   phases: [
-    { title: 'Prepare', detail: 'Sonnet runs the commands listing the files in scope, the untracked files and the dirty paths at launch, unless args carry them', model: 'sonnet' },
+    { title: 'Prepare', detail: 'Haiku runs the commands listing the files in scope, the untracked files and the dirty paths at launch, unless args carry them', model: 'haiku' },
     { title: 'Scout', detail: 'the session model (or args.model) at medium effort designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
     { title: 'Triage', detail: 'Opus classifies each fixed medium-or-higher finding by the kinds of change in its hunks; a production kind means another round; runs beside the next round when the finders already justify one, beside the next scout otherwise', model: 'opus' },
@@ -276,7 +276,7 @@ ${blocks}`
 // restore it stops the loop), so every later round's state is this one plus
 // what the fixes so far touched.
 const GIT = 'git -c core.quotePath=false'
-const PREPARE_OPTS = { model: 'sonnet', effort: 'low' }
+const PREPARE_OPTS = { model: 'haiku', effort: 'low' }
 const shellQuote = (s) => `'${s.replace(/'/g, `'\\''`)}'`
 
 // --no-renames lists both sides of a rename.

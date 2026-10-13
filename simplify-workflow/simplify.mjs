@@ -2,13 +2,13 @@ export const meta = {
   name: 'simplify-converge',
   description: 'Loop simplification rounds (find, judge, apply) over a scope until fresh finders come up empty, then prune non-useful comments once converged',
   phases: [
-    { title: 'Prepare', detail: 'Sonnet runs the commands listing the scope, the untracked files and the source files with no comment in scope, and hashes the tree', model: 'sonnet' },
+    { title: 'Prepare', detail: 'Haiku runs the commands listing the scope, the untracked files and the source files with no comment in scope, and hashes the tree', model: 'haiku' },
     { title: 'Find', detail: 'read-only agents propose simplifications per batch', model: 'opus' },
     { title: 'Judge', detail: 'independent gatekeepers strike proposals that are not genuine improvements', model: 'sonnet' },
     { title: 'Apply', detail: 'implement the approved findings per batch' },
-    { title: 'Hash', detail: 'deterministic tree hash after each round an applier ran in, and each prune pass', model: 'sonnet' },
+    { title: 'Hash', detail: 'deterministic tree hash after each round an applier ran in, and each prune pass', model: 'haiku' },
     { title: 'Discover', detail: 'list untracked files the appliers did not declare', model: 'sonnet' },
-    { title: 'Verify', detail: 'project check command: baseline on sonnet beside the first round\'s finders and judges, then an opus fix-up agent after each editing phase', model: 'opus' },
+    { title: 'Verify', detail: 'project check command: baseline on haiku beside the first round\'s finders and judges, then an opus fix-up agent after each editing phase', model: 'opus' },
     { title: 'Prune', detail: 'audit and delete non-useful comments per file batch', model: 'opus' },
   ],
 }
@@ -85,7 +85,7 @@ const EXCLUDE = input.excludePattern ? input.excludePattern.trim() : DEFAULT_EXC
 const PRUNE_EXTS = input.pruneExts.map((e) => (e.startsWith('.') ? e : `.${e}`))
 const GIT = 'git -c core.quotePath=false'
 const LIST_TRACKED_CMD = SCOPE === 'codebase' ? `${GIT} ls-files` : `${GIT} diff --name-only ${BASE}`
-const PREPARE_OPTS = { model: 'sonnet', effort: 'low' }
+const PREPARE_OPTS = { model: 'haiku', effort: 'low' }
 
 const COPY_SCHEMA = {
   type: 'object',
@@ -339,7 +339,7 @@ const applyOpts = override ?? { ...(input.applyModel ? { model: input.applyModel
 const pruneOpts = override ?? { model: 'opus', effort: 'medium' }
 const judgeOpts = { model: 'sonnet', effort: 'high' }
 const fixOpts = { model: 'opus', effort: 'high' }
-const checkOpts = { model: 'sonnet', effort: 'low' }
+const checkOpts = { model: 'haiku', effort: 'low' }
 
 const GROUPS = ['Performance improvements', 'Code simplifications', 'Bug fixes']
 
@@ -534,7 +534,7 @@ async function runHash(cmd, label) {
         label: `${label}.${attempt}`,
         phase: 'Hash',
         schema: HASH_SCHEMA,
-        model: 'sonnet',
+        model: 'haiku',
         effort: 'low',
       })
     } catch {

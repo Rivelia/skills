@@ -2,7 +2,7 @@ export const meta = {
   name: 'adversarial-review',
   description: 'Adversarial code review over a scope: finders per dimension, dedup at intake, two skeptics per finding, root-cause clustering, implementers that commit their own fix',
   phases: [
-    { title: 'Prepare', detail: 'Sonnet lists the untracked and the dirty paths at launch, unless args carry them', model: 'sonnet' },
+    { title: 'Prepare', detail: 'Haiku lists the untracked and the dirty paths at launch, unless args carry them', model: 'haiku' },
     { title: 'Find', detail: 'one finder per dimension: Opus at medium effort for production code, Sonnet at high effort for a dimension with production=false', model: 'opus' },
     { title: 'Dedup', detail: 'Sonnet intake check against the registered findings in the same file, serialized per file', model: 'sonnet' },
     { title: 'Verify', detail: 'Sonnet materiality skeptic, then Sonnet technical skeptic; their verdicts gate the finding and grade the report, never what the implementer reads', model: 'sonnet' },
@@ -500,7 +500,7 @@ Report what you found, what you restored or deleted, and which protected paths s
 // Listed here when the args omit it, so the launching session never carries
 // the paths. --no-renames lists both sides of a rename.
 const GIT = 'git -c core.quotePath=false'
-const PREPARE_OPTS = { model: 'sonnet', effort: 'low' }
+const PREPARE_OPTS = { model: 'haiku', effort: 'low' }
 const shellQuote = (s) => `'${s.replace(/'/g, `'\\''`)}'`
 const PREPARE_SECTIONS = [
   { name: 'untracked', cmd: `${GIT} ls-files -o --exclude-standard` },
