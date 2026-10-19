@@ -21,7 +21,7 @@ One Workflow runs adversarial review rounds, each opened by a no-comments pass t
 
    Set `loopStart` to `git rev-parse HEAD`, which is `W` when this step made one; omit it for `codebase`. The author's commits are `<BASE>..loopStart`; every commit after it is the run's.
 
-   For a diff-bounded scope, list the paths for the launch as `files`, via Bash from the project root: `git -c core.quotePath=false diff --name-only <BASE>`. Pass them however many there are: the workflow would otherwise list them through agents copying the output, which is slower and can fail. For `codebase`, list nothing: the workflow lists them itself.
+   Never pass a file list in the args, whatever the scope's size or an earlier run's failure: the workflow lists the files itself, and the script rejects a `files` arg.
 
 3. **Locate the four scripts.** [merge-ready.mjs](merge-ready.mjs) sits next to this SKILL.md, in the directory named by the `Base directory for this skill:` line of this skill's invocation. `review.mjs` sits in the `adversarial-review-workflow` skill folder, `simplify.mjs` in the `simplify-workflow` skill folder and `no-comments.mjs` in the `no-comments` skill folder: look for each as a sibling of this skill's folder first, then in the skills directory that holds this skill (e.g. `~/.claude/skills/<name>/`). Resolve all four to absolute paths, following symlinks (`readlink -f`). If a sibling script is missing, tell the user which skill to install and stop.
 
@@ -40,11 +40,11 @@ One Workflow runs adversarial review rounds, each opened by a no-comments pass t
    ```
    Workflow({
      scriptPath: "<absolute path to merge-ready.mjs>",
-     args: { scope: "<scope, since for a commit-ish>", root: "<absolute project root>", base: "<commit, omitted for codebase>", reviewScript: "<absolute path to review.mjs>", simplifyScript: "<absolute path to simplify.mjs>", noCommentsScript: "<absolute path to no-comments.mjs>", context: "<project description>", files: [<paths, omitted when step 2 listed nothing>], loopStart: "<HEAD after step 2, or the dead run's; omitted for codebase>", intent: "<the author's note, omitted when none>", checks: "<check commands, omitted when none found>", checkCmd: "<single check command, omitted when none found>", pruneExts: [<extensions>], excludePattern: "<regex, omitted to keep the default>", model: "<model argument, omitted when not given>" }
+     args: { scope: "<scope, since for a commit-ish>", root: "<absolute project root>", base: "<commit, omitted for codebase>", reviewScript: "<absolute path to review.mjs>", simplifyScript: "<absolute path to simplify.mjs>", noCommentsScript: "<absolute path to no-comments.mjs>", context: "<project description>", loopStart: "<HEAD after step 2, or the dead run's; omitted for codebase>", intent: "<the author's note, omitted when none>", checks: "<check commands, omitted when none found>", checkCmd: "<single check command, omitted when none found>", pruneExts: [<extensions>], excludePattern: "<regex, omitted to keep the default>", model: "<model argument, omitted when not given>" }
    })
    ```
 
-   Pass `files` and `pruneExts` as real JSON arrays. The script validates the args and throws on a missing one.
+   Pass `pruneExts` as a real JSON array. The script validates the args and throws on a missing one.
 
    **If the run dies** (a session limit, a killed task), never resume it with `resumeFromRunId`, whatever the harness suggests; relaunch it by [RELAUNCH.md](RELAUNCH.md) in this skill's folder.
 

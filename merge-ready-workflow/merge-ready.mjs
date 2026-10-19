@@ -2,7 +2,7 @@ export const meta = {
   name: 'merge-ready',
   description: 'Repeat the adversarial code review over a scope, each round opened by a comment pass and its finders re-scouted over the files not yet clean for two rounds, until a round fixes nothing medium or higher that changes production behaviour and fewer than half its finders reported a medium-or-higher fix, confirmed by a round over the full scope; then simplify the same scope with the comment flags as seeds, strip what simplify wrote, and review the reshapes once',
   phases: [
-    { title: 'Prepare', detail: 'Haiku runs the command listing the files in scope, unless args carry them', model: 'haiku' },
+    { title: 'Prepare', detail: 'Haiku runs the command listing the files in scope', model: 'haiku' },
     { title: 'Comments', detail: 'the no-comments workflow (no-comments.mjs): full before every round and after simplify, flags before simplify, delete-only after the closing review' },
     { title: 'Scout', detail: 'the session model (or args.model) at medium effort designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
@@ -44,9 +44,8 @@ for (const key of ['checks', 'checkCmd', 'excludePattern', 'model', 'intent']) {
     throw new Error(`args.${key}: a non-empty string when given; omit it otherwise`)
   }
 }
-const listGiven = input.files !== undefined
-if (listGiven && (!Array.isArray(input.files) || input.files.some((p) => typeof p !== 'string'))) {
-  throw new Error('args.files: pass it as string[] or omit it to have the workflow list the files')
+if (input.files !== undefined) {
+  throw new Error('args.files: omit it; the workflow lists the files in scope itself')
 }
 if (input.scope === 'codebase'
   ? input.loopStart !== undefined
@@ -262,6 +261,7 @@ const COPY_SCHEMA = {
 
 const MARKER = '::section::'
 const CHUNK_BYTES = 6000
+const COPY_ATTEMPTS = 3
 
 function copyBody(sections) {
   const body = sections.map((sec) => `echo '${MARKER} ${sec.name}'\n${sec.cmd}`).join('\n')
@@ -279,21 +279,21 @@ const COPY_RULE = 'Return its entire output verbatim as `output`: every line, in
 
 function copyPrompt(sections, what) {
   const ranges = `LC_ALL=C awk -v max=${CHUNK_BYTES} '{ l = length($0) + 1; if (n && b + l > max) { print s, NR - 1; n = 0; b = 0 } if (!n) s = NR; n++; b += l } END { if (n) print s, NR }' "$f"`
-  return `${copyIntro(what)} A long output comes back cut or miscopied, so the command numbers the output's lines into parts of at most ${CHUNK_BYTES} bytes, prints one \`::part::\` line per part (first line, last line, cksum), then the first part itself; other helpers fetch the remaining parts.
+  return `${copyIntro(what)} A long output comes back cut or miscopied, so the command saves the output to a file, prints its path on a \`::file::\` line, numbers the output's lines into parts of at most ${CHUNK_BYTES} bytes, prints one \`::part::\` line per part (first line, last line, cksum), then the first part itself; other helpers fetch the remaining parts from the file.
 
 Run exactly this shell command via Bash, unmodified, as a single call:
 
-f=$(mktemp) && ${copyBody(sections)} > "$f" && r=$(${ranges}) && echo "$r" | while read -r s e; do echo "::part:: $s $e $(sed -n "$s,\${e}p" "$f" | cksum)"; done && sed -n "$(echo "$r" | head -n 1 | tr ' ' ',')p" "$f"; rm -f "$f"
+f=$(mktemp /tmp/merge-ready-copy.XXXXXX) && ${copyBody(sections)} > "$f" && r=$(${ranges}) && echo "::file:: $f" && echo "$r" | while read -r s e; do echo "::part:: $s $e $(sed -n "$s,\${e}p" "$f" | cksum)"; done && sed -n "$(echo "$r" | head -n 1 | tr ' ' ',')p" "$f"
 
 ${COPY_RULE}`
 }
 
-function chunkPrompt(sections, what, chunk, index, count) {
-  return `${copyIntro(what)} A long output comes back cut or miscopied, so it is fetched in ${count} parts; this is part ${index}, lines ${chunk.start} to ${chunk.end}, which the \`sed\` at the end keeps.
+function chunkPrompt(file, what, chunk, index, count) {
+  return `${copyIntro(what)} A long output comes back cut or miscopied, so another helper saved it to a file and it is fetched in ${count} parts; this is part ${index}, lines ${chunk.start} to ${chunk.end}.
 
 Run exactly this shell command via Bash, unmodified, as a single call:
 
-${copyBody(sections)} | sed -n '${chunk.start},${chunk.end}p'
+sed -n '${chunk.start},${chunk.end}p' ${shellQuote(file)}
 
 ${COPY_RULE}`
 }
@@ -304,8 +304,11 @@ function copiedLines(text) {
 
 function parseHead(output) {
   const lines = copiedLines(output)
+  const at = lines.findIndex((l) => /^::file:: \/tmp\/merge-ready-copy\.\S+\s*$/.test(l))
+  if (at < 0) return null
+  const file = lines[at].trim().slice('::file:: '.length)
   const chunks = []
-  let i = 0
+  let i = at + 1
   for (; i < lines.length; i++) {
     const c = /^::part:: (\d+) (\d+) (\d+) (\d+)\s*$/.exec(lines[i])
     if (c) chunks.push({ start: +c[1], end: +c[2], crc: +c[3], bytes: +c[4] })
@@ -313,7 +316,7 @@ function parseHead(output) {
   }
   if (!chunks.length || chunks.some((c, k) => c.start !== (k ? chunks[k - 1].end + 1 : 1) || c.end < c.start)) return null
   const first = verifyChunk(lines.slice(i).join('\n'), chunks[0])
-  return first ? { chunks, first } : null
+  return first ? { file, chunks, first } : null
 }
 
 const isCodeFence = (l) => /^\s*```\S*\s*$/.test(l)
@@ -399,9 +402,9 @@ function parseCopy(lines, sections) {
 async function runCopy(sections, what, label, phaseName, opts) {
   const head = await copyAttempts(copyPrompt(sections, what), label, phaseName, opts, parseHead)
   if (!head.value) return head
-  const { chunks, first } = head.value
+  const { file, chunks, first } = head.value
   const rest = await parallel(chunks.slice(1).map((chunk, k) => () =>
-    copyAttempts(chunkPrompt(sections, what, chunk, k + 2, chunks.length), `${label} part ${k + 2}`, phaseName, opts, (out) => verifyChunk(out, chunk))))
+    copyAttempts(chunkPrompt(file, what, chunk, k + 2, chunks.length), `${label} part ${k + 2}`, phaseName, opts, (out) => verifyChunk(out, chunk))))
   const failed = rest.findIndex((r) => !r || !r.value)
   if (failed >= 0) return { value: null, error: rest[failed] ? rest[failed].error : `the ${label} part ${failed + 2} copy threw` }
   const value = parseCopy([...first, ...rest.flatMap((r) => r.value)], sections)
@@ -410,14 +413,14 @@ async function runCopy(sections, what, label, phaseName, opts) {
 
 async function copyAttempts(prompt, label, phaseName, opts, parse) {
   const failures = []
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (let attempt = 1; attempt <= COPY_ATTEMPTS; attempt++) {
     const r = await run(prompt, { label: `${label}.${attempt}`, phase: phaseName, schema: COPY_SCHEMA, ...opts })
     const declined = r && r.declined && r.declined.trim()
     const value = r && !declined ? parse(r.output) : null
     if (value) return { value, error: null }
     failures.push(!r ? 'died' : declined ? `declined to run the command (${declined})` : 'returned an output that failed its check')
   }
-  return { value: null, error: `the ${label} agent ${failures[0] === failures[1] ? `${failures[0]} twice` : `${failures[0]}, then ${failures[1]}`}` }
+  return { value: null, error: `the ${label} agent failed ${COPY_ATTEMPTS} times: ${failures.join('; ')}` }
 }
 
 const AGENT_LIMIT_ERRORS = ['WorkflowAgentCapError', 'WorkflowBudgetExceededError']
@@ -493,10 +496,7 @@ const excludedKindsTable = {}
 log(`scope ${SCOPE}${BASE ? ` against ${BASE.slice(0, 8)}` : ''}, up to ${MAX_ROUNDS} review round(s), each opened by a comment pass, scout and implementers on ${MODEL || 'the session model'}, simplify afterwards`)
 
 phase('Prepare')
-const sortedPaths = (paths) => [...new Set(paths.map((p) => p.trim()).filter(Boolean))].sort()
-const { value: launch, error: prepareError } = listGiven
-  ? { value: { files: sortedPaths(input.files) }, error: null }
-  : await runCopy(PREPARE_SECTIONS, 'the files in scope the review loop starts from', 'prepare', 'Prepare', PREPARE_OPTS)
+const { value: launch, error: prepareError } = await runCopy(PREPARE_SECTIONS, 'the files in scope the review loop starts from', 'prepare', 'Prepare', PREPARE_OPTS)
 if (!launch) {
   stopReason = 'prepare-failed'
   stopDetail = prepareError
@@ -509,7 +509,7 @@ function commentScanSections(files, base) {
     : `grep -qE '(${COMMENT_TOKEN}|^;)' -- "$f"`
   return [{
     name: 'scan',
-    cmd: `printf '%s\\n' ${files.map(shellQuote).join(' ')} | while IFS= read -r f; do if [ -f "$f" ] && ${hasComment}; then echo "$(($(wc -l < "$f"))) $f"; else echo "none $f"; fi; done`,
+    cmd: `printf '%s\\n' ${files.map(shellQuote).join(' ')} | while IFS= read -r f; do i=$((i + 1)); if [ -f "$f" ] && ${hasComment}; then echo "$i $(($(wc -l < "$f")))"; fi; done`,
   }]
 }
 
@@ -517,15 +517,14 @@ async function commentPass(mode, files, base, tag) {
   let candidates = commentCandidates(files)
   if (!candidates.length) return { result: null, error: null, skipped: 'no comment-carrying file to audit' }
   const lines = {}
-  const { value: scan, error: scanError } = await runCopy(commentScanSections(candidates, base), 'which files carry a comment in scope, and their line counts', `scan ${tag}`, 'Comments', PREPARE_OPTS)
+  const { value: scan, error: scanError } = await runCopy(commentScanSections(candidates, base), 'which files carry a comment in scope, by position in the list, and their line counts', `scan ${tag}`, 'Comments', PREPARE_OPTS)
   if (scan) {
-    const none = new Set()
     for (const l of scan.scan) {
-      const m = /^(none|\d+) (.+)$/.exec(l)
-      if (m && m[1] === 'none') none.add(m[2])
-      else if (m) lines[m[2]] = +m[1]
+      const m = /^(\d+) (\d+)$/.exec(l)
+      const f = m && candidates[+m[1] - 1]
+      if (f) lines[f] = +m[2]
     }
-    candidates = candidates.filter((f) => !none.has(f))
+    candidates = candidates.filter((f) => Object.hasOwn(lines, f))
     if (!candidates.length) return { result: null, error: null, skipped: 'no file with a comment in scope' }
   } else {
     log(`${tag} comment pass: the comment scan failed (${scanError}); every candidate goes to Comment Sicko`)
