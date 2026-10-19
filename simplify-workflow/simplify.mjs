@@ -109,6 +109,7 @@ function prepareSections() {
 const MARKER = '::section::'
 const CHUNK_BYTES = 6000
 const COPY_ATTEMPTS = 3
+const SPLIT_DEPTH = 3
 
 function copyBody(sections) {
   const body = sections.map((sec) => `echo '${MARKER} ${sec.name}'\n${sec.cmd}`).join('\n')
@@ -135,14 +136,23 @@ f=$(mktemp /tmp/simplify-copy.XXXXXX) && ${copyBody(sections)} > "$f" && r=$(${r
 ${COPY_RULE}`
 }
 
-function chunkPrompt(file, what, chunk, index, count) {
-  return `${copyIntro(what)} A long output comes back cut or miscopied, so another helper saved it to a file and it is fetched in ${count} parts; this is part ${index}, lines ${chunk.start} to ${chunk.end}.
+function chunkPrompt(file, what, start, end) {
+  const slice = `sed -n '${start},${end}p' ${shellQuote(file)}`
+  return `${copyIntro(what)} A long output comes back cut or miscopied, so another helper saved it to a file and it is fetched in parts; this part is lines ${start} to ${end}, after a \`::part::\` line carrying their cksum.
 
 Run exactly this shell command via Bash, unmodified, as a single call:
 
-sed -n '${chunk.start},${chunk.end}p' ${shellQuote(file)}
+echo "::part:: ${start} ${end} $(${slice} | cksum)"; ${slice}
 
 ${COPY_RULE}`
+}
+
+function parsePart(output, start, end) {
+  const lines = asCopied(output)
+  const at = lines.findIndex((l) => l.startsWith('::part:: '))
+  const c = at < 0 ? null : /^::part:: (\d+) (\d+) (\d+) (\d+)\s*$/.exec(lines[at])
+  if (!c || +c[1] !== start || +c[2] !== end) return null
+  return verifyChunk(lines.slice(at + 1).join('\n'), { start, end, crc: +c[3], bytes: +c[4] })
 }
 
 function parseHead(output) {
@@ -255,24 +265,39 @@ async function runCopy(sections, what, label, phase, opts) {
   const head = await copyAttempts(copyPrompt(sections, what), label, phase, opts, parseHead)
   if (!head.value) return head
   const { file, chunks, first } = head.value
-  const rest = await parallel(chunks.slice(1).map((chunk, k) => () =>
-    copyAttempts(chunkPrompt(file, what, chunk, k + 2, chunks.length), `${label} part ${k + 2}`, phase, opts, (out) => verifyChunk(out, chunk))))
-  const failed = rest.findIndex((r) => !r || !r.value)
-  if (failed >= 0) return { value: null, error: rest[failed] ? rest[failed].error : `the ${label} part ${failed + 2} copy threw` }
-  const value = parseCopy([...first, ...rest.flatMap((r) => r.value)], sections)
+  const rest = await joinRanges(chunks.slice(1).map((c) => () => fetchRange(file, what, c.start, c.end, label, phase, opts, 0)), label)
+  if (!rest.value) return rest
+  const value = parseCopy([...first, ...rest.value], sections)
   return value ? { value, error: null } : { value: null, error: `the ${label} output lacks a section marker` }
 }
 
-async function copyAttempts(prompt, label, phase, opts, parse) {
+// A copy agent drops or repeats a line of a long list the same way on every
+// retry, so a failed range is halved instead of retried, down to SPLIT_DEPTH.
+async function fetchRange(file, what, start, end, label, phase, opts, depth) {
+  const leaf = depth === SPLIT_DEPTH || start === end
+  const r = await copyAttempts(chunkPrompt(file, what, start, end), `${label} lines ${start}-${end}`, phase, opts, (out) => parsePart(out, start, end), leaf ? COPY_ATTEMPTS : 1)
+  if (r.value || leaf) return r
+  const mid = Math.floor((start + end) / 2)
+  return joinRanges([[start, mid], [mid + 1, end]].map(([s, e]) => () => fetchRange(file, what, s, e, label, phase, opts, depth + 1)), label)
+}
+
+async function joinRanges(thunks, label) {
+  const parts = await parallel(thunks)
+  const failed = parts.find((p) => !p || !p.value)
+  if (failed !== undefined) return failed || { value: null, error: `a ${label} copy threw` }
+  return { value: parts.flatMap((p) => p.value), error: null }
+}
+
+async function copyAttempts(prompt, label, phase, opts, parse, attempts = COPY_ATTEMPTS) {
   const failures = []
-  for (let attempt = 1; attempt <= COPY_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
     const r = await run(prompt, { label: `${label}.${attempt}`, phase, schema: COPY_SCHEMA, ...opts })
     const declined = r && r.declined && r.declined.trim()
     const value = r && !declined ? parse(r.output) : null
     if (value) return { value, error: null }
     failures.push(!r ? 'died' : declined ? `declined to run the command (${declined})` : 'returned an output that failed its check')
   }
-  return { value: null, error: `the ${label} agent failed ${COPY_ATTEMPTS} times: ${failures.join('; ')}` }
+  return { value: null, error: `the ${label} agent failed ${attempts === 1 ? 'once' : `${attempts} times`}: ${failures.join('; ')}` }
 }
 
 function hashCommand() {
