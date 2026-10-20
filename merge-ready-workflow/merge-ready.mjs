@@ -573,7 +573,7 @@ function commentFailure(pass) {
   if (pass.error) return pass.error
   if (pass.result?.commit?.reason === 'the commit agent died') return 'its commit agent died, so the tree may be dirty'
   if (pass.result && pass.result.commit?.clean !== true) return 'its commit agent did not report a clean tree, so the tree may be dirty'
-  if (pass.result && !pass.result.head) return 'its commit agent reported no valid HEAD sha'
+  if (pass.result?.commit?.committed && !pass.result.head) return 'its commit agent reported no valid HEAD sha'
   return null
 }
 
@@ -639,7 +639,7 @@ for (let round = 1; launch && round <= MAX_ROUNDS; round++) {
     log(`round ${round}: stopping, the comment pass failed: ${passFailure}`)
     break
   }
-  if (pass.result) passBase = pass.result.head
+  if (pass.result?.head) passBase = pass.result.head
 
   phase('Scout')
   const fullScope = [...new Set([...launch.files, ...allFixes.flatMap((f) => f.files || []), ...commentTouched])].sort()
@@ -792,7 +792,7 @@ if (stopReason !== 'converged') {
     simplify = { ran: false, skipped: 'comments-failed', error: `the seeds comment pass failed: ${spFailure}`, result: null }
     log(`simplify skipped: ${simplify.error}`)
   } else {
-    if (sp.result) passBase = sp.result.head
+    if (sp.result?.head) passBase = sp.result.head
     phase('Simplify')
     const simplifyArgs = { scope: SCOPE, root: ROOT, pruneExts: input.pruneExts, excludePattern: EXCLUDE_PATTERN, skipComments: true, seeds: sp.result ? sp.result.seeds : [] }
     if (BASE) simplifyArgs.base = BASE
@@ -812,8 +812,10 @@ if (stopReason !== 'converged') {
 }
 
 const preSimplify = passBase
-if (simplify.ran && !simplify.result.head) {
-  closingSkipped = simplify.result.commit?.reason === 'the commit agent died' ? 'simplify\'s commit agent died, so the tree may be dirty' : 'simplify\'s commit agent reported no valid HEAD sha, so the tree may be dirty'
+if (simplify.ran && simplify.result.commit?.reason === 'the commit agent died') {
+  closingSkipped = 'simplify\'s commit agent died, so the tree may be dirty'
+} else if (simplify.ran && simplify.result.commit?.committed && !simplify.result.head) {
+  closingSkipped = 'simplify\'s commit agent reported no valid HEAD sha, so the tree may be dirty'
 } else if (simplify.ran && simplify.result.commit?.clean !== true) {
   closingSkipped = 'simplify\'s commit agent did not report a clean tree'
 } else if (simplify.ran) {
@@ -824,7 +826,7 @@ if (simplify.ran && !simplify.result.head) {
   if (apFailure) {
     closingSkipped = `the comment pass after simplify failed: ${apFailure}`
   } else {
-    const afterHead = ap.result ? ap.result.head : simplify.result.head
+    const afterHead = ap.result?.head || simplify.result.head || preSimplify
     const reshapeFiles = [...new Set([
       ...(simplify.result.seeds?.applied || []).flatMap((c) => c.files || []),
       ...(ap.result?.fixFiles || []),

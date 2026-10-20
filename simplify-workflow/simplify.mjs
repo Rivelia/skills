@@ -641,7 +641,7 @@ if (!input.skipComments) {
   const openingFailure = error
     || (result.commit?.reason === 'the commit agent died' && 'the opening comment pass\'s commit agent died, so its edits may sit uncommitted in the working tree')
     || (result.commit && result.commit.clean !== true && 'the opening comment pass\'s commit agent did not report a clean tree, so its edits may sit uncommitted in the working tree')
-    || (result.commit && !result.head && 'the opening comment pass\'s commit agent reported no valid HEAD sha')
+    || (result.commit?.committed && !result.head && 'the opening comment pass\'s commit agent reported no valid HEAD sha')
   if (openingFailure) {
     log(`simplify skipped: ${openingFailure}`)
     return { skipped: 'comments-failed', error: openingFailure, comments: { opening: result, closing: null } }
@@ -1175,8 +1175,10 @@ if (input.skipComments) {
   closingSkipped = 'run by the caller'
 } else if (stopReason !== 'converged') {
   closingSkipped = 'simplification never converged'
-} else if (!head) {
-  closingSkipped = commitResult ? 'the commit agent reported no valid HEAD sha, so the tree may be dirty' : 'the commit agent died, so the tree may be dirty'
+} else if (!commitResult) {
+  closingSkipped = 'the commit agent died, so the tree may be dirty'
+} else if (commit.committed && !head) {
+  closingSkipped = 'the commit agent reported no valid HEAD sha, so the tree may be dirty'
 } else if (commitResult.clean !== true) {
   closingSkipped = 'the commit agent did not report a clean tree'
 } else if (commentFiles.length) {
@@ -1223,7 +1225,7 @@ if (!input.skipComments && closingSkipped && commentFiles.length) say(`The closi
 if (closingError) say(`The closing comment pass failed (${closingError}), so the comments the appliers wrote may still be in the tree.`)
 if (closingComments?.commit?.reason === 'the commit agent died') say('The closing comment pass\'s commit agent died, so its comment deletions may sit uncommitted in the working tree.', true)
 else if (closingComments?.commit && closingComments.commit.clean !== true) say('The closing comment pass\'s commit agent did not report a clean tree, so its comment deletions may sit uncommitted in the working tree.', true)
-else if (closingComments?.commit && !closingComments.head) say('The closing comment pass\'s commit agent reported no valid HEAD sha, so the reported head may predate its commit.')
+else if (closingComments?.commit?.committed && !closingComments.head) say('The closing comment pass\'s commit agent reported no valid HEAD sha, so the reported head may predate its commit.')
 if (seedFailed.length) say(`${seedFailed.length} seed(s) were never applied, because their judge or applier died or the applier skipped them; they are listed under \`seeds.failed\`.`)
 if (!commit.committed && commit.reason === 'the commit agent died' && (edited || fixEdited || editPossible)) say('The commit agent died, so the run\'s changes sit uncommitted in the working tree.', true)
 else if (commitResult && !commit.clean) say('The commit agent did not report a clean tree, so some of the run\'s changes may sit uncommitted in the working tree.', true)
