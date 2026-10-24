@@ -7,6 +7,7 @@ Skills for Claude Code.
 | Skill | What it does |
 | --- | --- |
 | `merge-ready-workflow` | Takes a scope (uncommitted, branch, unpushed, codebase, or the work since a commit) to a mergeable state: adversarial review rounds, each opened by a no-comments pass that strips comments and fixes the code they excused, until a round fixes too little to justify another; then the simplify workflow, a comment pass over what it wrote, one review round over every refactor and constraint encoding landed since the last round, and a last pass stripping the comments that review's fixes wrote. Every stage commits. Needs `adversarial-review-workflow`, `simplify-workflow` and `no-comments`. |
+| `babysit` | Takes GitLab MRs to merged, or the current branch's MR with no argument. Each MR gets its own worktree and runs `merge-ready-workflow branch`. Then it is pushed, marked ready and approved, and set to a squash auto-merge with a `Changelog:` trailer and source-branch deletion. It is watched until merged, with failing pipelines fixed or retried; an MR that needs a decision is held for the user. Needs `merge-ready-workflow`. |
 | `adversarial-review-workflow` | One adversarial review over a scope: finders per dimension, two skeptics per finding, auto-fixes each confirmed finding with its smallest fix unless that fix is an excluded kind. |
 | `simplify-workflow` | A no-comments pass whose refactors and constraint encodings go through a judge, simplification rounds (find, judge, apply) over a scope until fresh finders come up empty, a commit, then a pass stripping the comments the appliers wrote. Needs `no-comments`. |
 | `mr-rebase-review` | Rebases a GitLab MR or branch onto its target when behind, audits the rebase for dropped upstream changes, reviews the MR for over-engineering, debt and spec conflicts, then lists decisions and, on approval, pushes and posts the critique as MR threads. |
@@ -52,7 +53,7 @@ A project-level install lands in the working directory and needs nothing.
 Remove the installed skills, then add them again. `skills update` keeps whatever name a skill was installed under, so it misses renamed skills; a remove and add does not. The list includes retired names so an older install is cleaned too.
 
 ```bash
-bunx skills@latest remove adversarial-review-workflow auto-adversarial-code-review-workflow auto-adversarial-code-review-loop-workflow changelogs-to-patch-notes glab-diffnote glab-upload merge-ready-workflow mr-rebase-review no-comments prune-agent-docs simplify-workflow --global -y
+bunx skills@latest remove adversarial-review-workflow babysit auto-adversarial-code-review-workflow auto-adversarial-code-review-loop-workflow changelogs-to-patch-notes glab-diffnote glab-upload merge-ready-workflow mr-rebase-review no-comments prune-agent-docs simplify-workflow --global -y
 ```
 
 ```bash
