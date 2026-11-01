@@ -2,7 +2,7 @@ export const meta = {
   name: 'merge-ready',
   description: 'Repeat the adversarial code review over a scope, each round opened by a comment pass and its finders re-scouted over the files not yet clean for two rounds, until a round fixes nothing medium or higher that changes production behaviour and fewer than half its finders reported a medium-or-higher fix, confirmed by a round over the full scope; then simplify the same scope with the comment flags as seeds, strip what simplify wrote, and review the reshapes once',
   phases: [
-    { title: 'Prepare', detail: 'Haiku runs the command listing the files in scope', model: 'haiku' },
+    { title: 'Prepare', detail: 'Sonnet runs the command listing the files in scope', model: 'sonnet' },
     { title: 'Comments', detail: 'the no-comments workflow (no-comments.mjs): full before every round and after simplify, flags before simplify, delete-only after the closing review' },
     { title: 'Scout', detail: 'the session model (or args.model) at medium effort designs the finder dimensions afresh for the round' },
     { title: 'Review', detail: 'the adversarial-review workflow (review.mjs) over the round\'s dimensions' },
@@ -244,7 +244,7 @@ ${blocks}`
 }
 
 const GIT = 'git -c core.quotePath=false'
-const PREPARE_OPTS = { model: 'haiku', effort: 'low' }
+const PREPARE_OPTS = { model: 'sonnet', effort: 'low' }
 
 const PREPARE_SECTIONS = [
   { name: 'files', cmd: SCOPE === 'codebase' ? `${GIT} ls-files` : `${GIT} diff --name-only ${BASE}` },

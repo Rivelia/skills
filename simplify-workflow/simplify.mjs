@@ -2,7 +2,7 @@ export const meta = {
   name: 'simplify-converge',
   description: 'Strip comments with the no-comments workflow and judge its MUST KILL flags and constraints as seeds, loop simplification rounds (find, judge, apply) over a scope until fresh finders come up empty, commit, then strip the comments the appliers wrote',
   phases: [
-    { title: 'Prepare', detail: 'Haiku runs the commands listing the scope, the untracked files and the source files with no comment in scope, and hashes the tree', model: 'haiku' },
+    { title: 'Prepare', detail: 'Sonnet runs the commands listing the scope, the untracked files and the source files with no comment in scope, and hashes the tree', model: 'sonnet' },
     { title: 'Comments', detail: 'standalone only: the no-comments workflow (no-comments.mjs), in flags mode before the loop and delete-only after the commit' },
     { title: 'Seeds', detail: 'judge, then apply, the MUST KILL flags and constraints the opening comment pass returned' },
     { title: 'Find', detail: 'read-only agents propose simplifications per batch', model: 'opus' },
@@ -79,7 +79,7 @@ const PRUNE_EXTS = input.pruneExts.map((e) => (e.startsWith('.') ? e : `.${e}`))
 const GIT = 'git -c core.quotePath=false'
 const LIST_TRACKED_CMD = SCOPE === 'codebase' ? `${GIT} ls-files` : `${GIT} diff --name-only ${BASE}`
 const LIST_UNTRACKED_CMD = `${GIT} ls-files -o --exclude-standard`
-const PREPARE_OPTS = { model: 'haiku', effort: 'low' }
+const PREPARE_OPTS = { model: 'sonnet', effort: 'low' }
 
 const COPY_SCHEMA = {
   type: 'object',
